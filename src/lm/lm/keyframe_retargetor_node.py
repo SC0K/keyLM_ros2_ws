@@ -19,6 +19,7 @@ from lm.keyframe_box_retarget import (
     _pick_existing_default_ee,
     _pick_existing_default_feet,
     infer_scaled_targets,
+    infer_scaled_targets_with_corner_surface_alignment,
     solve_multi_ee_ik,
 )
 
@@ -140,6 +141,7 @@ def map_points_by_frame_transform(
     dst_quat_wxyz: np.ndarray,
     pts_world: np.ndarray,
 ) -> np.ndarray:
+    '''Map points by applying the relative transform from source frame to destination frame.'''
     src_rot = _quat_wxyz_to_rotmat(_quat_wxyz_normalize(src_quat_wxyz))
     dst_rot = _quat_wxyz_to_rotmat(_quat_wxyz_normalize(dst_quat_wxyz))
     local = (np.asarray(pts_world, dtype=np.float64) - np.asarray(src_pos, dtype=np.float64)) @ src_rot
@@ -451,7 +453,12 @@ class KeyframeRetargetorNode(Node):
             size=dst_box_used.size.copy(),
             quat_wxyz=src_box.quat_wxyz.copy(),
         )
-        targets_infer = infer_scaled_targets(src_box, dst_box_infer, ee_world)
+        targets_infer = infer_scaled_targets_with_corner_surface_alignment(
+            src_box=src_box,
+            dst_box=dst_box_infer,
+            ee_world=ee_world,
+            robot_root=q0[0:3].copy(),
+        )
 
         src_forward_axis = self._infer_source_forward_axis(q0[3:7], src_box.quat_wxyz)
         src_forward_world = _forward_world_from_axis(src_box.quat_wxyz, src_forward_axis)

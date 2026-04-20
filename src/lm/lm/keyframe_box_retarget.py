@@ -114,6 +114,63 @@ def infer_scaled_targets(src_box: BoxFrame, dst_box: BoxFrame, ee_world: np.ndar
     dst_local = normalized * dst_box.half_extents
     return dst_box.local_to_world(dst_local)
 
+def _corner_codes() -> np.ndarray:
+    vals = (-1.0, 1.0)
+    return np.asarray([[sx, sy, sz] for sx in vals for sy in vals for sz in vals], dtype=np.float64)
+
+
+def _corner_world_from_code(box: BoxFrame, code: np.ndarray) -> np.ndarray:
+    local = np.asarray(code, dtype=np.float64) * box.half_extents
+    return box.local_to_world(local[None, :])[0]
+
+
+def _closest_corner_codes_for_ees(src_box: BoxFrame, ee_world: np.ndarray, robot_root: np.ndarray) -> np.ndarray:
+    codes = _corner_codes()
+    corners = np.vstack([_corner_world_from_code(src_box, c) for c in codes])  # (8,3)
+    out = []
+    for ee in ee_world:
+        cost = np.linalg.norm(corners - ee[None, :], axis=1) + np.linalg.norm(corners - robot_root[None, :], axis=1)
+        out.append(codes[int(np.argmin(cost))])
+    return np.asarray(out, dtype=np.float64)
+
+
+def infer_scaled_targets_with_corner_surface_alignment(
+    src_box: BoxFrame,
+    dst_box: BoxFrame,
+    ee_world: np.ndarray,
+    robot_root: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Scale EE targets, then slide on the current target-box surface to match source corner-relative direction/distance."""
+    if ee_world.size == 0:
+        return ee_world.copy(), ee_world.copy()
+
+    scaled_world = infer_scaled_targets(src_box, dst_box, ee_world)
+    scaled_local = dst_box.world_to_local(scaled_world)
+    half = np.maximum(dst_box.half_extents, 1e-9)
+
+    corner_codes = _closest_corner_codes_for_ees(src_box, ee_world, robot_root)
+    out_local = scaled_local.copy()
+    for i in range(ee_world.shape[0]):
+        code = corner_codes[i]
+        src_corner = _corner_world_from_code(src_box, code)
+        dst_corner = _corner_world_from_code(dst_box, code)
+
+        # Desired corner-relative vector from source, transplanted to target corner.
+        desired_world = dst_corner + (ee_world[i] - src_corner)
+        desired_local = dst_box.world_to_local(desired_world[None, :])[0]
+
+        # Keep the EE on the same surface (face) as the initially scaled target.
+        norm = np.abs(out_local[i]) / half
+        face_axis = int(np.argmax(norm))
+        face_val = np.sign(out_local[i, face_axis]) * half[face_axis]
+        if abs(face_val) < 1e-12:
+            face_val = half[face_axis]
+
+        local = np.clip(desired_local, -half, half)
+        local[face_axis] = face_val
+        out_local[i] = local
+    projected_world = dst_box.local_to_world(out_local)
+    return projected_world, scaled_world
 
 def map_point_by_box_corner_reference(src_box: BoxFrame, dst_box: BoxFrame, point_world: np.ndarray) -> np.ndarray:
     """Map a world point from source-box frame to target-box frame via normalized box coordinates.
@@ -435,7 +492,43 @@ def process_file(
         "dst_box_center_used": dst_box_used.center.copy(),
         "dst_box_quat_used": dst_box_used.quat_wxyz.copy(),
     }
+def infer_scaled_targets_with_corner_surface_alignment(
+    src_box: BoxFrame,
+    dst_box: BoxFrame,
+    ee_world: np.ndarray,
+    robot_root: np.ndarray,
+) -> np.ndarray:
+    """Scale EE targets, then slide on the current target-box surface to match source corner-relative direction/distance."""
+    if ee_world.size == 0:
+        return ee_world.copy(), ee_world.copy()
 
+    scaled_world = infer_scaled_targets(src_box, dst_box, ee_world)
+    scaled_local = dst_box.world_to_local(scaled_world)
+    half = np.maximum(dst_box.half_extents, 1e-9)
+
+    corner_codes = _closest_corner_codes_for_ees(src_box, ee_world, robot_root)
+    out_local = scaled_local.copy()
+    for i in range(ee_world.shape[0]):
+        code = corner_codes[i]
+        src_corner = _corner_world_from_code(src_box, code)
+        dst_corner = _corner_world_from_code(dst_box, code)
+
+        # Desired corner-relative vector from source, transplanted to target corner.
+        desired_world = dst_corner + (ee_world[i] - src_corner)
+        desired_local = dst_box.world_to_local(desired_world[None, :])[0]
+
+        # Keep the EE on the same surface (face) as the initially scaled target.
+        norm = np.abs(out_local[i]) / half
+        face_axis = int(np.argmax(norm))
+        face_val = np.sign(out_local[i, face_axis]) * half[face_axis]
+        if abs(face_val) < 1e-12:
+            face_val = half[face_axis]
+
+        local = np.clip(desired_local, -half, half)
+        local[face_axis] = face_val
+        out_local[i] = local
+    projected_world = dst_box.local_to_world(out_local)
+    return projected_world
 
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
