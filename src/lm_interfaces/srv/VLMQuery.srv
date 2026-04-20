@@ -1,0 +1,11 @@
+string task_text
+string planner_context
+---
+bool success
+string error_message
+string next_keyframe
+bool object_in_manipulation
+bool task_completion
+string raw_json
+float32 latency_sec
+builtin_interfaces/Time image_stamp
