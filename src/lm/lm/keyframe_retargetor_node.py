@@ -27,6 +27,8 @@ _AXIS_TO_LOCAL_VEC = {
     "-x": np.array([-1.0, 0.0, 0.0], dtype=np.float64),
     "y": np.array([0.0, 1.0, 0.0], dtype=np.float64),
     "-y": np.array([0.0, -1.0, 0.0], dtype=np.float64),
+    "z": np.array([0.0, 0.0, 1.0], dtype=np.float64),
+    "-z": np.array([0.0, 0.0, -1.0], dtype=np.float64),
 }
 
 
@@ -42,6 +44,19 @@ def _quat_wxyz_multiply(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
         ],
         dtype=np.float64,
     )
+
+
+def _quat_wxyz_conj(q: np.ndarray) -> np.ndarray:
+    q = np.asarray(q, dtype=np.float64)
+    return np.array([q[0], -q[1], -q[2], -q[3]], dtype=np.float64)
+
+
+def _quat_wxyz_normalize(q: np.ndarray) -> np.ndarray:
+    q = np.asarray(q, dtype=np.float64)
+    n = float(np.linalg.norm(q))
+    if n < 1e-12:
+        return np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+    return q / n
 
 
 def _quat_wxyz_to_rotmat(q: np.ndarray) -> np.ndarray:
@@ -69,6 +84,17 @@ def _yaw_from_quat_wxyz(q: np.ndarray) -> float:
     return float(math.atan2(rot[1, 0], rot[0, 0]))
 
 
+def _yaw_quat_from_forward_xy(forward_world: np.ndarray, fallback_quat_wxyz: np.ndarray) -> np.ndarray:
+    v = np.asarray(forward_world, dtype=np.float64).copy()
+    v[2] = 0.0
+    n = float(np.linalg.norm(v[:2]))
+    if n < 1e-9:
+        yaw = _yaw_from_quat_wxyz(fallback_quat_wxyz)
+    else:
+        yaw = float(math.atan2(v[1], v[0]))
+    return _yaw_to_quat_wxyz(yaw)
+
+
 def _pose_to_arrays(msg: PoseStamped) -> tuple[np.ndarray, np.ndarray]:
     pos = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z], dtype=np.float64)
     quat_wxyz = np.array(
@@ -90,18 +116,46 @@ def _normalize_axis_label(text: str) -> str:
     return key
 
 
-def _normalize_xy(v: np.ndarray, fallback: np.ndarray) -> np.ndarray:
+def _normalize_vec(v: np.ndarray, fallback: np.ndarray) -> np.ndarray:
     out = np.asarray(v, dtype=np.float64).copy()
-    out[2] = 0.0
-    n = float(np.linalg.norm(out[:2]))
+    n = float(np.linalg.norm(out))
     if n < 1e-9:
         fb = np.asarray(fallback, dtype=np.float64).copy()
-        fb[2] = 0.0
-        n_fb = float(np.linalg.norm(fb[:2]))
+        n_fb = float(np.linalg.norm(fb))
         if n_fb < 1e-9:
             return np.array([1.0, 0.0, 0.0], dtype=np.float64)
         return fb / n_fb
     return out / n
+
+
+def _forward_world_from_axis(quat_wxyz: np.ndarray, axis_label: str) -> np.ndarray:
+    rot = _quat_wxyz_to_rotmat(quat_wxyz)
+    return _normalize_vec(rot @ _AXIS_TO_LOCAL_VEC[axis_label], np.array([1.0, 0.0, 0.0], dtype=np.float64))
+
+
+def map_points_by_frame_transform(
+    src_pos: np.ndarray,
+    src_quat_wxyz: np.ndarray,
+    dst_pos: np.ndarray,
+    dst_quat_wxyz: np.ndarray,
+    pts_world: np.ndarray,
+) -> np.ndarray:
+    src_rot = _quat_wxyz_to_rotmat(_quat_wxyz_normalize(src_quat_wxyz))
+    dst_rot = _quat_wxyz_to_rotmat(_quat_wxyz_normalize(dst_quat_wxyz))
+    local = (np.asarray(pts_world, dtype=np.float64) - np.asarray(src_pos, dtype=np.float64)) @ src_rot
+    return local @ dst_rot.T + np.asarray(dst_pos, dtype=np.float64)
+
+
+def map_orientation_by_frame_transform(
+    src_quat_wxyz: np.ndarray,
+    dst_quat_wxyz: np.ndarray,
+    quat_wxyz: np.ndarray,
+) -> np.ndarray:
+    src_q = _quat_wxyz_normalize(src_quat_wxyz)
+    dst_q = _quat_wxyz_normalize(dst_quat_wxyz)
+    q = _quat_wxyz_normalize(quat_wxyz)
+    delta_q = _quat_wxyz_multiply(dst_q, _quat_wxyz_conj(src_q))
+    return _quat_wxyz_normalize(_quat_wxyz_multiply(delta_q, q))
 
 
 class KeyframeRetargetorNode(Node):
@@ -117,8 +171,8 @@ class KeyframeRetargetorNode(Node):
         self.declare_parameter("retargeted_keyframe_topic", "/retargetor/output_keyframe")
         self.declare_parameter("retargeted_info_topic", "/retargetor/output_info")
         self.declare_parameter("library_dir", "")
-        self.declare_parameter("box_size_xyz", [0.35, 0.35, 0.35])
-        self.declare_parameter("box_forward_axis", "x")
+        self.declare_parameter("box_size_xyz", [0.3, 0.3, 0.3])
+        self.declare_parameter("box_hold_forward_axis", "x")
         self.declare_parameter("stand_before_pick_offset_m", 0.2)
         self.declare_parameter("stand_before_place_height_m", 1.0)
         self.declare_parameter("robot", "g1")
@@ -133,7 +187,9 @@ class KeyframeRetargetorNode(Node):
         retargeted_keyframe_topic = self.get_parameter("retargeted_keyframe_topic").value
         retargeted_info_topic = self.get_parameter("retargeted_info_topic").value
         self._box_size_xyz = np.asarray(self.get_parameter("box_size_xyz").value, dtype=np.float64)
-        self._box_forward_axis = _normalize_axis_label(str(self.get_parameter("box_forward_axis").value))
+        self._box_hold_forward_axis = _normalize_axis_label(
+            str(self.get_parameter("box_hold_forward_axis").value)
+        )
         self._stand_before_pick_offset_m = float(self.get_parameter("stand_before_pick_offset_m").value)
         self._stand_before_place_height_m = float(self.get_parameter("stand_before_place_height_m").value)
         robot_xml = str(self.get_parameter("robot_xml").value).strip()
@@ -180,7 +236,11 @@ class KeyframeRetargetorNode(Node):
         self._retargeted_info_pub = self.create_publisher(String, retargeted_info_topic, 10)
 
         self.get_logger().info(
-            f"Retargetor ready. Keyframes: {self._library_dir}. box_forward_axis={self._box_forward_axis}"
+            "Retargetor ready. Keyframes: %s. target_forward_axis=%s"
+            % (
+                self._library_dir,
+                self._box_hold_forward_axis,
+            )
         )
 
     def _resolve_library_dir(self, configured_path: str) -> Path:
@@ -225,8 +285,8 @@ class KeyframeRetargetorNode(Node):
 
     def _on_box_forward_axis(self, msg: String) -> None:
         try:
-            self._box_forward_axis = _normalize_axis_label(msg.data)
-            self.get_logger().info(f"Updated box_forward_axis to '{self._box_forward_axis}'")
+            self._box_hold_forward_axis = _normalize_axis_label(msg.data)
+            self.get_logger().info("Updated target forward axis to %s" % self._box_hold_forward_axis)
         except ValueError as exc:
             self.get_logger().warn(str(exc))
 
@@ -349,46 +409,21 @@ class KeyframeRetargetorNode(Node):
                 body_rotations[i] = self._ik_data.xquat[bid]
             self._write_body_arrays(payload, body_positions, body_rotations)
 
-    def _infer_library_forward_axis_label(self, root_quat_wxyz: np.ndarray, src_box_quat_wxyz: np.ndarray) -> str:
+    def _infer_source_forward_axis(self, root_quat_wxyz: np.ndarray, src_box_quat_wxyz: np.ndarray) -> str:
         root_rot = _quat_wxyz_to_rotmat(root_quat_wxyz)
-        root_forward_world = _normalize_xy(root_rot @ np.array([1.0, 0.0, 0.0], dtype=np.float64), np.array([1.0, 0.0, 0.0], dtype=np.float64))
+        root_forward = root_rot @ np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        root_forward[2] = 0.0
+        root_forward = _normalize_vec(root_forward, np.array([1.0, 0.0, 0.0], dtype=np.float64))
         box_rot = _quat_wxyz_to_rotmat(src_box_quat_wxyz)
-
-        best_label = "x"
-        best_score = -1e9
-        for label, axis_local in _AXIS_TO_LOCAL_VEC.items():
-            axis_world = _normalize_xy(box_rot @ axis_local, np.array([1.0, 0.0, 0.0], dtype=np.float64))
-            score = float(np.dot(axis_world[:2], root_forward_world[:2]))
-            if score > best_score:
-                best_score = score
-                best_label = label
-        return best_label
-
-    def _align_src_box_for_manual_forward_axis(
-        self, src_box: BoxFrame, dst_box: BoxFrame, root_quat_wxyz: np.ndarray
-    ) -> tuple[BoxFrame, str, float]:
-        library_axis = self._infer_library_forward_axis_label(root_quat_wxyz, src_box.quat_wxyz)
-        src_rot = _quat_wxyz_to_rotmat(src_box.quat_wxyz)
-        dst_rot = _quat_wxyz_to_rotmat(dst_box.quat_wxyz)
-        src_forward_world = _normalize_xy(
-            src_rot @ _AXIS_TO_LOCAL_VEC[library_axis], np.array([1.0, 0.0, 0.0], dtype=np.float64)
-        )
-        dst_forward_world = _normalize_xy(
-            dst_rot @ _AXIS_TO_LOCAL_VEC[self._box_forward_axis], np.array([1.0, 0.0, 0.0], dtype=np.float64)
-        )
-        src_yaw = float(math.atan2(src_forward_world[1], src_forward_world[0]))
-        dst_yaw = float(math.atan2(dst_forward_world[1], dst_forward_world[0]))
-        delta_yaw = dst_yaw - src_yaw
-        delta_q = _yaw_to_quat_wxyz(delta_yaw)
-        src_quat_aligned = _quat_wxyz_multiply(delta_q, src_box.quat_wxyz)
-        src_box_aligned = BoxFrame(
-            center=src_box.center.copy(), size=src_box.size.copy(), quat_wxyz=src_quat_aligned
-        )
-        return src_box_aligned, library_axis, delta_yaw
+        axis_world = {
+            label: _normalize_vec(box_rot @ vec, np.array([1.0, 0.0, 0.0], dtype=np.float64))
+            for label, vec in _AXIS_TO_LOCAL_VEC.items()
+        }
+        return max(axis_world.keys(), key=lambda k: float(np.dot(axis_world[k], root_forward)))
 
     def _apply_box_ik(self, payload: dict[str, np.ndarray], dst_center: np.ndarray, dst_quat: np.ndarray) -> None:
-        q_init = self._build_qpos_from_payload(payload)
-        self._ik_data.qpos[:] = q_init
+        q0 = self._build_qpos_from_payload(payload)
+        self._ik_data.qpos[:] = q0
         mujoco.mj_forward(self._ik_model, self._ik_data)
 
         ee_world = np.vstack([_get_body_pos(self._ik_data, bid) for bid in self._ik_ee_body_ids])
@@ -404,19 +439,59 @@ class KeyframeRetargetorNode(Node):
             self.get_logger().info(f"Retargeting without object. Using ee to estimate: src_center={src_center}, src_quat={src_quat}")
 
         src_box = BoxFrame(center=src_center, size=self._box_size_xyz.copy(), quat_wxyz=src_quat)
-        dst_box = BoxFrame(
+        preferred_dst_quat = np.asarray(dst_quat, dtype=np.float64).copy()
+        dst_box_used = BoxFrame(
             center=np.asarray(dst_center, dtype=np.float64),
             size=self._box_size_xyz.copy(),
-            quat_wxyz=np.asarray(dst_quat, dtype=np.float64),
+            quat_wxyz=preferred_dst_quat,
         )
-        src_box_aligned, library_axis, delta_yaw = self._align_src_box_for_manual_forward_axis(
-            src_box, dst_box, q_init[3:7]
+        # Stage 1: keep source orientation for EE target inference.
+        dst_box_infer = BoxFrame(
+            center=src_box.center.copy(),
+            size=dst_box_used.size.copy(),
+            quat_wxyz=src_box.quat_wxyz.copy(),
+        )
+        targets_infer = infer_scaled_targets(src_box, dst_box_infer, ee_world)
+
+        src_forward_axis = self._infer_source_forward_axis(q0[3:7], src_box.quat_wxyz)
+        src_forward_world = _forward_world_from_axis(src_box.quat_wxyz, src_forward_axis)
+        dst_forward_world = _forward_world_from_axis(dst_box_used.quat_wxyz, self._box_hold_forward_axis)
+        # Keep only horizontal (yaw) rotation for source->target transform.
+        src_stage2_quat = _yaw_quat_from_forward_xy(src_forward_world, src_box.quat_wxyz)
+        dst_stage2_quat = _yaw_quat_from_forward_xy(dst_forward_world, dst_box_used.quat_wxyz)
+        # Stage 2: rigidly rotate/translate inferred targets to final target position with yaw-only rotation.
+        targets = map_points_by_frame_transform(
+            src_pos=dst_box_infer.center,
+            src_quat_wxyz=src_stage2_quat,
+            dst_pos=dst_box_used.center,
+            dst_quat_wxyz=dst_stage2_quat,
+            pts_world=targets_infer,
         )
         self.get_logger().info(
-            "Box-axis remap: lib_axis=%s -> desired_axis=%s, delta_yaw_deg=%.1f"
-            % (library_axis, self._box_forward_axis, math.degrees(delta_yaw))
+            "Forward dirs | src forward(%s)=%s | tgt forward(%s)=%s"
+            % (
+                src_forward_axis,
+                np.array2string(src_forward_world, precision=3),
+                self._box_hold_forward_axis,
+                np.array2string(dst_forward_world, precision=3),
+            )
         )
-        targets = infer_scaled_targets(src_box_aligned, dst_box, ee_world)
+        # Move base together with the source->target box frame transform.
+        q_init = q0.copy()
+        base_before = q0[0:3].copy()
+        base_mapped = map_points_by_frame_transform(
+            src_pos=src_box.center,
+            src_quat_wxyz=src_stage2_quat,
+            dst_pos=dst_box_used.center,
+            dst_quat_wxyz=dst_stage2_quat,
+            pts_world=base_before[None, :],
+        )[0]
+        q_init[0:2] = base_mapped[0:2]
+        q_init[3:7] = map_orientation_by_frame_transform(
+            src_quat_wxyz=src_stage2_quat,
+            dst_quat_wxyz=dst_stage2_quat,
+            quat_wxyz=q0[3:7],
+        )
 
         foot_targets = None
         foot_mask = None

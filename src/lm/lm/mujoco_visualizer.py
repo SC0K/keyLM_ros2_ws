@@ -52,7 +52,7 @@ class MujocoVisualizerNode(Node):
         self.declare_parameter("current_box_pose_topic", "/vlm/current_box_pose")
         self.declare_parameter("target_box_pose_topic", "/vlm/target_box_pose")
         self.declare_parameter("retargeted_keyframe_topic", "/retargetor/output_keyframe")
-        self.declare_parameter("box_size_xyz", [0.35, 0.35, 0.35])
+        self.declare_parameter("box_size_xyz", [0.3, 0.3, 0.3])
 
         self._lock = threading.Lock()
         self._box_size_xyz = np.asarray(self.get_parameter("box_size_xyz").value, dtype=np.float64)

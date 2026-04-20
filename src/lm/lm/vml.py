@@ -40,11 +40,13 @@ class VLMClientNode(Node):
         self.declare_parameter("current_box_pose_topic", "/vlm/current_box_pose")
         self.declare_parameter("target_box_pose_topic", "/vlm/target_box_pose")
         self.declare_parameter("target_root_pose_topic", "/vlm/target_root_pose")
+        self.declare_parameter("box_forward_axis_topic", "/vlm/box_forward_axis")
         self.declare_parameter("current_box_center", [0.7, 0.0, 0.175])
         self.declare_parameter("current_box_quat_wxyz", [1.0, 0.0, 0.0, 0.0])           #TODO: update to actual box pose if available
         self.declare_parameter("default_place_distance_m", 1.6)
         self.declare_parameter("default_target_root_center", [1.6, 0.0, 0.7])
         self.declare_parameter("default_target_root_quat_wxyz", [1.0, 0.0, 0.0, 0.0])
+        self.declare_parameter("default_box_forward_axis", "x")
 
         self._current_box_center = np.asarray(self.get_parameter("current_box_center").value, dtype=np.float64)
         self._current_box_quat_wxyz = np.asarray(self.get_parameter("current_box_quat_wxyz").value, dtype=np.float64)
@@ -55,17 +57,20 @@ class VLMClientNode(Node):
         self._default_target_root_quat_wxyz = np.asarray(
             self.get_parameter("default_target_root_quat_wxyz").value, dtype=np.float64
         )
+        self._default_box_forward_axis = str(self.get_parameter("default_box_forward_axis").value).strip()
 
         selected_keyframe_topic = self.get_parameter("selected_keyframe_topic").value
         object_to_manipulate_topic = self.get_parameter("object_to_manipulate_topic").value
         current_box_pose_topic = self.get_parameter("current_box_pose_topic").value
         target_box_pose_topic = self.get_parameter("target_box_pose_topic").value
         target_root_pose_topic = self.get_parameter("target_root_pose_topic").value
+        box_forward_axis_topic = self.get_parameter("box_forward_axis_topic").value
         self._selected_keyframe_pub = self.create_publisher(String, selected_keyframe_topic, 10)
         self._object_to_manipulate_pub = self.create_publisher(Bool, object_to_manipulate_topic, 10)
         self._current_box_pose_pub = self.create_publisher(PoseStamped, current_box_pose_topic, 10)
         self._target_box_pose_pub = self.create_publisher(PoseStamped, target_box_pose_topic, 10)
         self._target_root_pose_pub = self.create_publisher(PoseStamped, target_root_pose_topic, 10)
+        self._box_forward_axis_pub = self.create_publisher(String, box_forward_axis_topic, 10)
 
     def send_request(
         self,
@@ -135,7 +140,27 @@ class VLMClientNode(Node):
         )
         self._target_root_pose_pub.publish(target_root_pose_msg)
 
-        self.get_logger().info(f"Published retarget context for keyframe: {response.next_keyframe}")
+        # Default/manual target forward axis; can be overridden by VLM raw_json if present.
+        box_forward_axis = self._default_box_forward_axis
+        try:
+            raw = json.loads(response.raw_json) if response.raw_json else {}
+            if isinstance(raw, dict):
+                parsed = raw.get("box_forward_axis")
+                if isinstance(parsed, str) and parsed.strip():
+                    box_forward_axis = parsed.strip()
+                else:
+                    parsed_hold = raw.get("box_hold_forward_axis")
+                    if isinstance(parsed_hold, str) and parsed_hold.strip():
+                        box_forward_axis = parsed_hold.strip()
+        except Exception:
+            pass
+        forward_axis_msg = String()
+        forward_axis_msg.data = box_forward_axis
+        self._box_forward_axis_pub.publish(forward_axis_msg)
+
+        self.get_logger().info(
+            f"Published retarget context for keyframe: {response.next_keyframe}, box_forward_axis={box_forward_axis}"
+        )
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
