@@ -120,38 +120,46 @@ class VLMServiceNode(Node):
             self.get_logger().error(f"Failed to convert/store camera frame: {exc}")
 
     def _query_vlm(self, image_bgr, task_text: str, planner_context: str) -> tuple[KeyframeDecision, str, float]:
-        user_prompt = build_user_prompt(
-            task_text=task_text,
-            planner_context=planner_context,
-            allowed_keyframes=self._allowed_keyframes,
-        )
+        # user_prompt = build_user_prompt(
+        #     task_text=task_text,
+        #     planner_context=planner_context,
+        #     allowed_keyframes=self._allowed_keyframes,
+        # )
 
-        ok, encoded = cv2.imencode(".png", image_bgr)
-        if not ok:
-            raise RuntimeError("Failed to PNG-encode image from camera topic")
-        image_b64 = base64.b64encode(encoded.tobytes()).decode("ascii")
+        # ok, encoded = cv2.imencode(".png", image_bgr)
+        # if not ok:
+        #     raise RuntimeError("Failed to PNG-encode image from camera topic")
+        # image_b64 = base64.b64encode(encoded.tobytes()).decode("ascii")
 
-        start_time = time.perf_counter()
-        response = chat(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt, "images": [image_b64]},
-            ],
-            format=KeyframeDecision.model_json_schema(),
-            think=False,
-            options={
-                "temperature": 0.0,
-                "top_p": 0.95,
-                "top_k": 20,
-                "min_p": 0.0,
-                "presence_penalty": 1.5,
-                "repeat_penalty": 1.0,
-            },
+        # start_time = time.perf_counter()
+        # response = chat(
+        #     model=MODEL_NAME,
+        #     messages=[
+        #         {"role": "system", "content": SYSTEM_PROMPT},
+        #         {"role": "user", "content": user_prompt, "images": [image_b64]},
+        #     ],
+        #     format=KeyframeDecision.model_json_schema(),
+        #     think=False,
+        #     options={
+        #         "temperature": 0.0,
+        #         "top_p": 0.95,
+        #         "top_k": 20,
+        #         "min_p": 0.0,
+        #         "presence_penalty": 1.5,
+        #         "repeat_penalty": 1.0,
+        #     },
+        # )
+        # latency_sec = time.perf_counter() - start_time
+        # raw_content = response.message.content
+        # decision = KeyframeDecision.model_validate_json(raw_content)
+
+        decision = KeyframeDecision(
+            next_keyframe="crouch_to_place",
+            object_in_manipulation=True,
+            task_completion=False,
         )
-        latency_sec = time.perf_counter() - start_time
-        raw_content = response.message.content
-        decision = KeyframeDecision.model_validate_json(raw_content)
+        raw_content = decision.model_dump_json()
+        latency_sec = 0.123
         return decision, raw_content, latency_sec
 
     def _handle_query(self, request: VLMQuery.Request, response: VLMQuery.Response) -> VLMQuery.Response:

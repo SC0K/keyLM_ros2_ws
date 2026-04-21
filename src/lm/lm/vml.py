@@ -45,8 +45,9 @@ class VLMClientNode(Node):
         self.declare_parameter("current_box_quat_wxyz", [1.0, 0.0, 0.0, 0.0])           #TODO: update to actual box pose if available
         self.declare_parameter("default_place_distance_m", 1.6)
         self.declare_parameter("default_target_root_center", [1.6, 0.0, 0.7])
-        self.declare_parameter("default_target_root_quat_wxyz", [1.0, 0.0, 0.0, 0.0])
-        self.declare_parameter("default_box_forward_axis", "x")
+        self.declare_parameter("default_target_root_quat_wxyz", [ 0.707, 0.0, 0.0,  0.707])
+        self.declare_parameter("default_target_box_quat_wxyz", [0.707, 0.0, 0.0,  0.707])
+        self.declare_parameter("default_box_forward_axis", "-x")     # TODO: compute the forward axis at pickup.
 
         self._current_box_center = np.asarray(self.get_parameter("current_box_center").value, dtype=np.float64)
         self._current_box_quat_wxyz = np.asarray(self.get_parameter("current_box_quat_wxyz").value, dtype=np.float64)
@@ -56,6 +57,9 @@ class VLMClientNode(Node):
         )
         self._default_target_root_quat_wxyz = np.asarray(
             self.get_parameter("default_target_root_quat_wxyz").value, dtype=np.float64
+        )
+        self._default_target_box_quat_wxyz = np.asarray(
+            self.get_parameter("default_target_box_quat_wxyz").value, dtype=np.float64
         )
         self._default_box_forward_axis = str(self.get_parameter("default_box_forward_axis").value).strip()
 
@@ -126,9 +130,20 @@ class VLMClientNode(Node):
         box_rot = _quat_wxyz_to_rotmat(self._current_box_quat_wxyz)
         front_dir = box_rot[:, 0] # x_front
         target_box_center = self._current_box_center + self._default_place_distance_m * front_dir
+        target_box_quat = self._default_target_box_quat_wxyz.copy()
+        try:
+            raw = json.loads(response.raw_json) if response.raw_json else {}
+            if isinstance(raw, dict):
+                q = raw.get("target_box_quat_wxyz")
+                if isinstance(q, (list, tuple)) and len(q) == 4:
+                    q_arr = np.asarray(q, dtype=np.float64)
+                    if np.linalg.norm(q_arr) > 1e-9:
+                        target_box_quat = q_arr / np.linalg.norm(q_arr)
+        except Exception:
+            pass
         target_box_pose_msg = self._pose_stamped_from(
             center=target_box_center,
-            quat_wxyz=self._current_box_quat_wxyz,
+            quat_wxyz=target_box_quat,
             stamp=response.image_stamp,     
         )       # TODO: use actual box pose from vision instead of VLM timestamp 
         self._target_box_pose_pub.publish(target_box_pose_msg)
@@ -159,7 +174,7 @@ class VLMClientNode(Node):
         self._box_forward_axis_pub.publish(forward_axis_msg)
 
         self.get_logger().info(
-            f"Published retarget context for keyframe: {response.next_keyframe}, box_forward_axis={box_forward_axis}"
+            f"Published retarget context for keyframe: {response.next_keyframe}, target_box_quat={target_box_quat.tolist()}, box_forward_axis={box_forward_axis}"
         )
 
 

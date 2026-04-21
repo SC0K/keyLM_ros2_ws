@@ -227,6 +227,7 @@ class KeyframeRetargetorNode(Node):
         self._has_current_box_pose = False
         self._has_target_box_pose = False
         self._has_target_root_pose = False
+        self._has_box_forward_axis = False
 
         self.create_subscription(String, selected_keyframe_topic, self._on_selected_keyframe, 10)
         self.create_subscription(Bool, object_to_manipulate_topic, self._on_object_flag, 10)
@@ -288,7 +289,9 @@ class KeyframeRetargetorNode(Node):
     def _on_box_forward_axis(self, msg: String) -> None:
         try:
             self._box_hold_forward_axis = _normalize_axis_label(msg.data)
+            self._has_box_forward_axis = True
             self.get_logger().info("Updated target forward axis to %s" % self._box_hold_forward_axis)
+            self._maybe_process_pending_keyframe()
         except ValueError as exc:
             self.get_logger().warn(str(exc))
 
@@ -298,7 +301,7 @@ class KeyframeRetargetorNode(Node):
             return False
         if not self._object_to_manipulate:
             return self._has_target_root_pose
-        return self._has_current_box_pose and self._has_target_box_pose
+        return self._has_current_box_pose and self._has_target_box_pose and self._has_box_forward_axis
 
     def _process_keyframe(self, keyframe_name: str) -> None:
         payload = self._load_payload(keyframe_name)
