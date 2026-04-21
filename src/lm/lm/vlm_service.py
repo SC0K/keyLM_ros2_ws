@@ -154,7 +154,7 @@ class VLMServiceNode(Node):
         decision = KeyframeDecision.model_validate_json(raw_content)
 
         # decision = KeyframeDecision(
-        #     next_keyframe="stand_after_place",
+        #     next_keyframe="crouch_to_pick",
         #     object_in_manipulation=False,
         #     task_completion=True,
         # )

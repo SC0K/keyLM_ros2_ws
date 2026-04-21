@@ -76,17 +76,17 @@ def _pose_to_arrays(msg: PoseStamped) -> tuple[np.ndarray, np.ndarray]:
     return pos, quat_wxyz
 
 
-class KeyframeRetargetorNode(Node):
+class KeyframeRetargeterNode(Node):
     def __init__(self) -> None:
-        super().__init__("keyframe_retargetor_node")
+        super().__init__("keyframe_retargeter_node")
 
         self.declare_parameter("selected_keyframe_topic", "/vlm/selected_keyframe")
         self.declare_parameter("object_to_manipulate_topic", "/vlm/object_to_manipulate")
         self.declare_parameter("current_box_pose_topic", "/vlm/current_box_pose")
         self.declare_parameter("target_box_pose_topic", "/vlm/target_box_pose")
         self.declare_parameter("target_root_pose_topic", "/vlm/target_root_pose")
-        self.declare_parameter("retargeted_keyframe_topic", "/retargetor/output_keyframe")
-        self.declare_parameter("retargeted_info_topic", "/retargetor/output_info")
+        self.declare_parameter("retargeted_keyframe_topic", "/retargeter/output_keyframe")
+        self.declare_parameter("retargeted_info_topic", "/retargeter/output_info")
         self.declare_parameter("library_dir", "")
         self.declare_parameter("box_size_xyz", [0.35, 0.35, 0.35])
         self.declare_parameter("stand_before_pick_offset_m", 0.2)
@@ -146,7 +146,7 @@ class KeyframeRetargetorNode(Node):
         self._retargeted_keyframe_pub = self.create_publisher(UInt8MultiArray, retargeted_keyframe_topic, 10)
         self._retargeted_info_pub = self.create_publisher(String, retargeted_info_topic, 10)
 
-        self.get_logger().info(f"Retargetor ready. Keyframes: {self._library_dir}")
+        self.get_logger().info(f"Retargeter ready. Keyframes: {self._library_dir}")
 
     def _resolve_library_dir(self, configured_path: str) -> Path:
         if configured_path:
@@ -449,7 +449,7 @@ class KeyframeRetargetorNode(Node):
 
 def main(args: list[str] | None = None) -> None:
     rclpy.init(args=args)
-    node = KeyframeRetargetorNode()
+    node = KeyframeRetargeterNode()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

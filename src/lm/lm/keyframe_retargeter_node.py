@@ -160,9 +160,9 @@ def map_orientation_by_frame_transform(
     return _quat_wxyz_normalize(_quat_wxyz_multiply(delta_q, q))
 
 
-class KeyframeRetargetorNode(Node):
+class KeyframeRetargeterNode(Node):
     def __init__(self) -> None:
-        super().__init__("keyframe_retargetor_node")
+        super().__init__("keyframe_retargeter_node")
 
         self.declare_parameter("selected_keyframe_topic", "/vlm/selected_keyframe")
         self.declare_parameter("object_to_manipulate_topic", "/vlm/object_to_manipulate")
@@ -170,8 +170,8 @@ class KeyframeRetargetorNode(Node):
         self.declare_parameter("target_box_pose_topic", "/vlm/target_box_pose")
         self.declare_parameter("target_root_pose_topic", "/vlm/target_root_pose")
         self.declare_parameter("box_forward_axis_topic", "/vlm/box_forward_axis")
-        self.declare_parameter("retargeted_keyframe_topic", "/retargetor/output_keyframe")
-        self.declare_parameter("retargeted_info_topic", "/retargetor/output_info")
+        self.declare_parameter("retargeted_keyframe_topic", "/retargeter/output_keyframe")
+        self.declare_parameter("retargeted_info_topic", "/retargeter/output_info")
         self.declare_parameter("library_dir", "")
         self.declare_parameter("box_size_xyz", [0.3, 0.3, 0.3])
         self.declare_parameter("box_hold_forward_axis", "x")
@@ -239,7 +239,7 @@ class KeyframeRetargetorNode(Node):
         self._retargeted_info_pub = self.create_publisher(String, retargeted_info_topic, 10)
 
         self.get_logger().info(
-            "Retargetor ready. Keyframes: %s. target_forward_axis=%s"
+            "Retargeter ready. Keyframes: %s. target_forward_axis=%s"
             % (
                 self._library_dir,
                 self._box_hold_forward_axis,
@@ -623,7 +623,7 @@ class KeyframeRetargetorNode(Node):
 
 def main(args: list[str] | None = None) -> None:
     rclpy.init(args=args)
-    node = KeyframeRetargetorNode()
+    node = KeyframeRetargeterNode()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

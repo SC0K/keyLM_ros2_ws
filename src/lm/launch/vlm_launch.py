@@ -55,8 +55,8 @@ def generate_launch_description() -> LaunchDescription:
             ),
             Node(
                 package="lm",
-                executable="keyframe_retargetor",
-                name="keyframe_retargetor",
+                executable="keyframe_retargeter",
+                name="keyframe_retargeter",
                 output="screen",
             ),
             Node(

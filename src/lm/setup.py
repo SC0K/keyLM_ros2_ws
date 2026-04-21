@@ -59,7 +59,7 @@ setup(
             'dummy_camera = lm.dummy_camera:main',
             'vml = lm.vml:main',
             'keyframe_box_retarget = lm.keyframe_box_retarget:main',
-            'keyframe_retargetor = lm.keyframe_retargetor_node:main',
+            'keyframe_retargeter = lm.keyframe_retargeter_node:main',
             'mujoco_visualizer = lm.mujoco_visualizer:main',
         ],
     },
