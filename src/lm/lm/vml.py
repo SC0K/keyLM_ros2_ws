@@ -30,6 +30,29 @@ def _quat_wxyz_to_rotmat(q: np.ndarray) -> np.ndarray:
     )
 
 
+def _yaw_to_quat_wxyz(yaw: float) -> np.ndarray:
+    return np.array([math.cos(yaw / 2.0), 0.0, 0.0, math.sin(yaw / 2.0)], dtype=np.float64)
+
+
+def _infer_axis_label_from_world_dir(box_quat_wxyz: np.ndarray, world_dir: np.ndarray) -> str:
+    rot = _quat_wxyz_to_rotmat(box_quat_wxyz)
+    d = np.asarray(world_dir, dtype=np.float64)
+    n = np.linalg.norm(d)
+    if n < 1e-9:
+        d = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+    else:
+        d = d / n
+    candidates = {
+        "x": rot[:, 0],
+        "-x": -rot[:, 0],
+        "y": rot[:, 1],
+        "-y": -rot[:, 1],
+        "z": rot[:, 2],
+        "-z": -rot[:, 2],
+    }
+    return max(candidates.keys(), key=lambda k: float(np.dot(candidates[k], d)))
+
+
 class VLMClientNode(Node):
     def __init__(self, service_name: str) -> None:
         super().__init__("vlm_client_node")
@@ -41,17 +64,23 @@ class VLMClientNode(Node):
         self.declare_parameter("target_box_pose_topic", "/vlm/target_box_pose")
         self.declare_parameter("target_root_pose_topic", "/vlm/target_root_pose")
         self.declare_parameter("box_forward_axis_topic", "/vlm/box_forward_axis")
-        self.declare_parameter("current_box_center", [0.7, 0.0, 0.175])
+        self.declare_parameter("current_box_center", [0.7, 0.5, 0.15])
         self.declare_parameter("current_box_quat_wxyz", [1.0, 0.0, 0.0, 0.0])           #TODO: update to actual box pose if available
+        self.declare_parameter("box_size_xyz", [0.3, 0.3, 0.3])
         self.declare_parameter("default_place_distance_m", 1.6)
-        self.declare_parameter("default_target_root_center", [1.6, 0.0, 0.7])
+        self.declare_parameter("stand_before_pick_offset_m", 0.2)
+        self.declare_parameter("min_stand_root_height_m", 0.78)
+        self.declare_parameter("default_target_root_center", [2.3, 0.5, 0.78])  # TODO: find the correct target root pose for root mode (navifation)
         self.declare_parameter("default_target_root_quat_wxyz", [ 0.707, 0.0, 0.0,  0.707])
         self.declare_parameter("default_target_box_quat_wxyz", [0.707, 0.0, 0.0,  0.707])
-        self.declare_parameter("default_box_forward_axis", "-x")     # TODO: compute the forward axis at pickup.
+        self.declare_parameter("default_box_forward_axis", "x")     # TODO: compute the forward axis at pickup.
 
         self._current_box_center = np.asarray(self.get_parameter("current_box_center").value, dtype=np.float64)
         self._current_box_quat_wxyz = np.asarray(self.get_parameter("current_box_quat_wxyz").value, dtype=np.float64)
+        self._box_size_xyz = np.asarray(self.get_parameter("box_size_xyz").value, dtype=np.float64)
         self._default_place_distance_m = float(self.get_parameter("default_place_distance_m").value)
+        self._stand_before_pick_offset_m = float(self.get_parameter("stand_before_pick_offset_m").value)
+        self._min_stand_root_height_m = float(self.get_parameter("min_stand_root_height_m").value)
         self._default_target_root_center = np.asarray(
             self.get_parameter("default_target_root_center").value, dtype=np.float64
         )
@@ -61,7 +90,7 @@ class VLMClientNode(Node):
         self._default_target_box_quat_wxyz = np.asarray(
             self.get_parameter("default_target_box_quat_wxyz").value, dtype=np.float64
         )
-        self._default_box_forward_axis = str(self.get_parameter("default_box_forward_axis").value).strip()
+        self.box_forward_axis = str(self.get_parameter("default_box_forward_axis").value).strip()
 
         selected_keyframe_topic = self.get_parameter("selected_keyframe_topic").value
         object_to_manipulate_topic = self.get_parameter("object_to_manipulate_topic").value
@@ -130,6 +159,7 @@ class VLMClientNode(Node):
         box_rot = _quat_wxyz_to_rotmat(self._current_box_quat_wxyz)
         front_dir = box_rot[:, 0] # x_front
         target_box_center = self._current_box_center + self._default_place_distance_m * front_dir
+        target_box_center[2] = self._box_size_xyz[2] / 2.0 # TODO: compute actural target box pose.
         target_box_quat = self._default_target_box_quat_wxyz.copy()
         try:
             raw = json.loads(response.raw_json) if response.raw_json else {}
@@ -148,33 +178,58 @@ class VLMClientNode(Node):
         )       # TODO: use actual box pose from vision instead of VLM timestamp 
         self._target_box_pose_pub.publish(target_box_pose_msg)
 
+        target_root_center = self._default_target_root_center.copy()
+        target_root_quat = self._default_target_root_quat_wxyz.copy()
+        if response.next_keyframe == "stand_before_pick":
+            # Compute stand-before-pick root target in VLM client.
+            rot = _quat_wxyz_to_rotmat(self._current_box_quat_wxyz)
+            hx, hy = 0.5 * float(self._box_size_xyz[0]), 0.5 * float(self._box_size_xyz[1])
+            edge_centers_local = np.array([[hx, 0, 0], [-hx, 0, 0], [0, hy, 0], [0, -hy, 0]], dtype=np.float64)
+            edge_centers_world = edge_centers_local @ rot.T + self._current_box_center[None, :]
+            dists = np.linalg.norm(edge_centers_world[:, :2], axis=1)
+            nearest_idx = int(np.argmin(dists))
+            edge_center = edge_centers_world[nearest_idx]
+            outward = edge_center[:2] - self._current_box_center[:2]
+            n = np.linalg.norm(outward)
+            if n < 1e-9:
+                outward = np.array([1.0, 0.0], dtype=np.float64)
+            else:
+                outward = outward / n
+            root_xy = edge_center[:2] + self._stand_before_pick_offset_m * outward
+            facing_dir = -outward
+            root_z = max(float(self._default_target_root_center[2]), self._min_stand_root_height_m)
+            target_root_center = np.array([root_xy[0], root_xy[1], root_z], dtype=np.float64)
+            target_root_quat = _yaw_to_quat_wxyz(float(math.atan2(facing_dir[1], facing_dir[0])))
+            self.box_forward_axis = _infer_axis_label_from_world_dir(
+                self._current_box_quat_wxyz, np.array([facing_dir[0], facing_dir[1], 0.0], dtype=np.float64)
+            )
+
         target_root_pose_msg = self._pose_stamped_from(
-            center=self._default_target_root_center,
-            quat_wxyz=self._default_target_root_quat_wxyz,
+            center=target_root_center,
+            quat_wxyz=target_root_quat,
             stamp=response.image_stamp,
         )
         self._target_root_pose_pub.publish(target_root_pose_msg)
 
         # Default/manual target forward axis; can be overridden by VLM raw_json if present.
-        box_forward_axis = self._default_box_forward_axis
         try:
             raw = json.loads(response.raw_json) if response.raw_json else {}
             if isinstance(raw, dict):
                 parsed = raw.get("box_forward_axis")
                 if isinstance(parsed, str) and parsed.strip():
-                    box_forward_axis = parsed.strip()
+                    self.box_forward_axis = parsed.strip()
                 else:
                     parsed_hold = raw.get("box_hold_forward_axis")
                     if isinstance(parsed_hold, str) and parsed_hold.strip():
-                        box_forward_axis = parsed_hold.strip()
+                        self.box_forward_axis = parsed_hold.strip()
         except Exception:
             pass
         forward_axis_msg = String()
-        forward_axis_msg.data = box_forward_axis
+        forward_axis_msg.data = self.box_forward_axis
         self._box_forward_axis_pub.publish(forward_axis_msg)
 
         self.get_logger().info(
-            f"Published retarget context for keyframe: {response.next_keyframe}, target_box_quat={target_box_quat.tolist()}, box_forward_axis={box_forward_axis}"
+            f"Published retarget context for keyframe: {response.next_keyframe}, target_box_quat={target_box_quat.tolist()}, box_forward_axis={self.box_forward_axis}"
         )
 
 

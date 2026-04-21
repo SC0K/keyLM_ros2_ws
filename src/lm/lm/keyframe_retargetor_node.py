@@ -296,11 +296,12 @@ class KeyframeRetargetorNode(Node):
             self.get_logger().warn(str(exc))
 
     def _required_info_ready(self, keyframe_name: str) -> bool:
-        _ = keyframe_name
         if not self._has_object_flag:
             return False
         if not self._object_to_manipulate:
             return self._has_target_root_pose
+        if keyframe_name == "stand_before_pick":
+            return self._has_target_root_pose and self._has_box_forward_axis
         return self._has_current_box_pose and self._has_target_box_pose and self._has_box_forward_axis
 
     def _process_keyframe(self, keyframe_name: str) -> None:
@@ -571,15 +572,11 @@ class KeyframeRetargetorNode(Node):
             return "ik_to_current_box_stand_after_pick"
 
         if keyframe_name == "stand_before_pick":
-            root_center_new, root_quat_new = self._nearest_edge_root_pose(
-                self._current_box_center, self._current_box_quat_wxyz
-            )
-            body_positions, _ = self._extract_body_arrays(payload)
-            root_center_new[2] = float(body_positions[0, 2])
-            self._apply_root_pose(payload, root_center_new, root_quat_new)
+            # For stand_before_pick we only control robot root pose from VLM.
+            self._apply_root_pose(payload, self._target_root_center, self._target_root_quat_wxyz)
             payload["object_position_xyz"] = self._current_box_center.astype(payload["object_position_xyz"].dtype)
             payload["object_quat_wxyz"] = self._current_box_quat_wxyz.astype(payload["object_quat_wxyz"].dtype)
-            return "stand_before_pick_root_adjusted_and_object_synced"
+            return "stand_before_pick_root_from_vlm"
 
         if keyframe_name == "stand_before_place":
             above_target = self._target_box_center.copy()
