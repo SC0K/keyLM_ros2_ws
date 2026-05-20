@@ -14,6 +14,8 @@ def generate_launch_description() -> LaunchDescription:
     client_delay_sec = LaunchConfiguration("client_delay_sec")
     task_text = LaunchConfiguration("task_text")
     start_visualizer = LaunchConfiguration("start_visualizer")
+    actual_box_pose_topic = LaunchConfiguration("actual_box_pose_topic")
+    current_box_pose_topic = LaunchConfiguration("current_box_pose_topic")
 
     return LaunchDescription(
         [
@@ -23,6 +25,8 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("service_name", default_value="/vlm/query"),
             DeclareLaunchArgument("start_client", default_value="true"),
             DeclareLaunchArgument("client_delay_sec", default_value="2.0"),
+            DeclareLaunchArgument("actual_box_pose_topic", default_value="/actual_box_pose"),
+            DeclareLaunchArgument("current_box_pose_topic", default_value="/vlm/current_box_pose"),
             DeclareLaunchArgument(
                 "task_text",
                 default_value="Pick up the box on the ground and place it on the table.",
@@ -58,14 +62,19 @@ def generate_launch_description() -> LaunchDescription:
                 executable="keyframe_retargeter",
                 name="keyframe_retargeter",
                 output="screen",
+                parameters=[
+                    {
+                        "current_box_pose_topic": current_box_pose_topic,
+                    }
+                ],
             ),
-            Node(
-                package="lm",
-                executable="mujoco_visualizer",
-                name="mujoco_visualizer",
-                output="screen",
-                condition=IfCondition(start_visualizer),
-            ),
+            # Node(
+            #     package="lm",
+            #     executable="mujoco_visualizer",
+            #     name="mujoco_visualizer",
+            #     output="screen",
+            #     condition=IfCondition(start_visualizer),
+            # ),
             TimerAction(
                 period=client_delay_sec,
                 actions=[
@@ -80,6 +89,12 @@ def generate_launch_description() -> LaunchDescription:
                             task_text,
                             "--service",
                             service_name,
+                        ],
+                        parameters=[
+                            {
+                                "actual_box_pose_topic": actual_box_pose_topic,
+                                "current_box_pose_topic": current_box_pose_topic,
+                            }
                         ],
                     )
                 ],
