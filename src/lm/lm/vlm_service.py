@@ -132,34 +132,34 @@ class VLMServiceNode(Node):
         image_b64 = base64.b64encode(encoded.tobytes()).decode("ascii")
 
         start_time = time.perf_counter()
-        response = chat(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt, "images": [image_b64]},
-            ],
-            format=KeyframeDecision.model_json_schema(),
-            think=False,
-            options={
-                "temperature": 0.0,
-                "top_p": 0.95,
-                "top_k": 20,
-                "min_p": 0.0,
-                "presence_penalty": 1.5,
-                "repeat_penalty": 1.0,
-            },
-        )
-        latency_sec = time.perf_counter() - start_time
-        raw_content = response.message.content
-        decision = KeyframeDecision.model_validate_json(raw_content)
-
-        # decision = KeyframeDecision(
-        #     next_keyframe="crouch_to_pick",
-        #     object_in_manipulation=False,
-        #     task_completion=True,
+        # response = chat(
+        #     model=MODEL_NAME,
+        #     messages=[
+        #         {"role": "system", "content": SYSTEM_PROMPT},
+        #         {"role": "user", "content": user_prompt, "images": [image_b64]},
+        #     ],
+        #     format=KeyframeDecision.model_json_schema(),
+        #     think=False,
+        #     options={
+        #         "temperature": 0.0,
+        #         "top_p": 0.95,
+        #         "top_k": 20,
+        #         "min_p": 0.0,
+        #         "presence_penalty": 1.5,
+        #         "repeat_penalty": 1.0,
+        #     },
         # )
-        # raw_content = decision.model_dump_json()
-        # latency_sec = 0.123
+        # latency_sec = time.perf_counter() - start_time
+        # raw_content = response.message.content
+        # decision = KeyframeDecision.model_validate_json(raw_content)
+
+        decision = KeyframeDecision(
+            next_keyframe="crouch_to_pick",
+            object_in_manipulation=True,
+            task_completion=False,
+        )
+        raw_content = decision.model_dump_json()
+        latency_sec = 0.123
         return decision, raw_content, latency_sec
 
     def _handle_query(self, request: VLMQuery.Request, response: VLMQuery.Response) -> VLMQuery.Response:

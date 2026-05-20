@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import sys
+import time
 
 import numpy as np
 import rclpy
@@ -34,6 +35,28 @@ def _yaw_to_quat_wxyz(yaw: float) -> np.ndarray:
     return np.array([math.cos(yaw / 2.0), 0.0, 0.0, math.sin(yaw / 2.0)], dtype=np.float64)
 
 
+def _normalize_quat_wxyz(q: np.ndarray) -> np.ndarray:
+    q = np.asarray(q, dtype=np.float64)
+    norm = np.linalg.norm(q)
+    if norm < 1e-12:
+        return np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+    return q / norm
+
+
+def _pose_to_arrays(msg: PoseStamped) -> tuple[np.ndarray, np.ndarray]:
+    pos = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z], dtype=np.float64)
+    quat_wxyz = np.array(
+        [
+            msg.pose.orientation.w,
+            msg.pose.orientation.x,
+            msg.pose.orientation.y,
+            msg.pose.orientation.z,
+        ],
+        dtype=np.float64,
+    )
+    return pos, quat_wxyz
+
+
 def _infer_axis_label_from_world_dir(box_quat_wxyz: np.ndarray, world_dir: np.ndarray) -> str:
     rot = _quat_wxyz_to_rotmat(box_quat_wxyz)
     d = np.asarray(world_dir, dtype=np.float64)
@@ -60,12 +83,14 @@ class VLMClientNode(Node):
 
         self.declare_parameter("selected_keyframe_topic", "/vlm/selected_keyframe")
         self.declare_parameter("object_to_manipulate_topic", "/vlm/object_to_manipulate")
+        self.declare_parameter("actual_box_pose_topic", "/actual_box_pose")
         self.declare_parameter("current_box_pose_topic", "/vlm/current_box_pose")
         self.declare_parameter("target_box_pose_topic", "/vlm/target_box_pose")
         self.declare_parameter("target_root_pose_topic", "/vlm/target_root_pose")
         self.declare_parameter("box_forward_axis_topic", "/vlm/box_forward_axis")
         self.declare_parameter("current_box_center", [0.7, 0.5, 0.15])
-        self.declare_parameter("current_box_quat_wxyz", [1.0, 0.0, 0.0, 0.0])           #TODO: update to actual box pose if available
+        self.declare_parameter("current_box_quat_wxyz", [1.0, 0.0, 0.0, 0.0])
+        self.declare_parameter("actual_box_pose_timeout_sec", 2.0)
         self.declare_parameter("box_size_xyz", [0.3, 0.3, 0.3])
         self.declare_parameter("default_place_distance_m", 1.6)
         self.declare_parameter("stand_before_pick_offset_m", 0.2)
@@ -76,7 +101,12 @@ class VLMClientNode(Node):
         self.declare_parameter("default_box_forward_axis", "x")     # TODO: compute the forward axis at pickup.
 
         self._current_box_center = np.asarray(self.get_parameter("current_box_center").value, dtype=np.float64)
-        self._current_box_quat_wxyz = np.asarray(self.get_parameter("current_box_quat_wxyz").value, dtype=np.float64)
+        self._current_box_quat_wxyz = _normalize_quat_wxyz(
+            np.asarray(self.get_parameter("current_box_quat_wxyz").value, dtype=np.float64)
+        )
+        self._has_actual_box_pose = False
+        self._current_box_pose_stamp = None
+        self._current_box_frame_id = "world"
         self._box_size_xyz = np.asarray(self.get_parameter("box_size_xyz").value, dtype=np.float64)
         self._default_place_distance_m = float(self.get_parameter("default_place_distance_m").value)
         self._stand_before_pick_offset_m = float(self.get_parameter("stand_before_pick_offset_m").value)
@@ -94,16 +124,26 @@ class VLMClientNode(Node):
 
         selected_keyframe_topic = self.get_parameter("selected_keyframe_topic").value
         object_to_manipulate_topic = self.get_parameter("object_to_manipulate_topic").value
+        actual_box_pose_topic = self.get_parameter("actual_box_pose_topic").value
         current_box_pose_topic = self.get_parameter("current_box_pose_topic").value
         target_box_pose_topic = self.get_parameter("target_box_pose_topic").value
         target_root_pose_topic = self.get_parameter("target_root_pose_topic").value
         box_forward_axis_topic = self.get_parameter("box_forward_axis_topic").value
+        self._actual_box_pose_sub = self.create_subscription(
+            PoseStamped,
+            actual_box_pose_topic,
+            self._on_actual_box_pose,
+            10,
+        )
         self._selected_keyframe_pub = self.create_publisher(String, selected_keyframe_topic, 10)
         self._object_to_manipulate_pub = self.create_publisher(Bool, object_to_manipulate_topic, 10)
         self._current_box_pose_pub = self.create_publisher(PoseStamped, current_box_pose_topic, 10)
         self._target_box_pose_pub = self.create_publisher(PoseStamped, target_box_pose_topic, 10)
         self._target_root_pose_pub = self.create_publisher(PoseStamped, target_root_pose_topic, 10)
         self._box_forward_axis_pub = self.create_publisher(String, box_forward_axis_topic, 10)
+        self.get_logger().info(
+            f"VLM client will load actual box pose from {actual_box_pose_topic} and republish it on {current_box_pose_topic}"
+        )
 
     def send_request(
         self,
@@ -127,10 +167,10 @@ class VLMClientNode(Node):
         return future.result()
 
     @staticmethod
-    def _pose_stamped_from(center: np.ndarray, quat_wxyz: np.ndarray, stamp) -> PoseStamped:
+    def _pose_stamped_from(center: np.ndarray, quat_wxyz: np.ndarray, stamp, frame_id: str) -> PoseStamped:
         msg = PoseStamped()
         msg.header.stamp = stamp
-        msg.header.frame_id = "robot_root"
+        msg.header.frame_id = frame_id
         msg.pose.position.x = float(center[0])
         msg.pose.position.y = float(center[1])
         msg.pose.position.z = float(center[2])
@@ -140,7 +180,46 @@ class VLMClientNode(Node):
         msg.pose.orientation.z = float(quat_wxyz[3])
         return msg
 
+    def _on_actual_box_pose(self, msg: PoseStamped) -> None:
+        self._current_box_center, self._current_box_quat_wxyz = _pose_to_arrays(msg)
+        self._current_box_quat_wxyz = _normalize_quat_wxyz(self._current_box_quat_wxyz)
+        self._current_box_pose_stamp = msg.header.stamp
+        self._current_box_frame_id = msg.header.frame_id or "world"
+        if not self._has_actual_box_pose:
+            self.get_logger().info(
+                "Loaded actual box pose from simulator: center=%s quat=%s frame=%s"
+                % (
+                    np.array2string(self._current_box_center, precision=3),
+                    np.array2string(self._current_box_quat_wxyz, precision=3),
+                    self._current_box_frame_id,
+                )
+            )
+        self._has_actual_box_pose = True
+
+    def wait_for_actual_box_pose(self, timeout_sec: float) -> bool:
+        if self._has_actual_box_pose:
+            return True
+        if timeout_sec <= 0.0:
+            return False
+
+        deadline = time.monotonic() + timeout_sec
+        while rclpy.ok() and not self._has_actual_box_pose:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                break
+            rclpy.spin_once(self, timeout_sec=min(0.1, remaining))
+
+        if not self._has_actual_box_pose:
+            self.get_logger().warn(
+                "No actual box pose received before timeout; using configured current_box_center/current_box_quat_wxyz fallback."
+            )
+            return False
+        return True
+
     def publish_planner_outputs(self, response: VLMQuery.Response) -> None:
+        pose_stamp = self._current_box_pose_stamp if self._current_box_pose_stamp is not None else response.image_stamp
+        pose_frame_id = self._current_box_frame_id or "world"
+
         keyframe_msg = String()
         keyframe_msg.data = response.next_keyframe
         self._selected_keyframe_pub.publish(keyframe_msg)
@@ -152,7 +231,8 @@ class VLMClientNode(Node):
         current_box_pose_msg = self._pose_stamped_from(
             center=self._current_box_center,
             quat_wxyz=self._current_box_quat_wxyz,
-            stamp=response.image_stamp,
+            stamp=pose_stamp,
+            frame_id=pose_frame_id,
         )
         self._current_box_pose_pub.publish(current_box_pose_msg)
 
@@ -174,8 +254,9 @@ class VLMClientNode(Node):
         target_box_pose_msg = self._pose_stamped_from(
             center=target_box_center,
             quat_wxyz=target_box_quat,
-            stamp=response.image_stamp,     
-        )       # TODO: use actual box pose from vision instead of VLM timestamp 
+            stamp=pose_stamp,
+            frame_id=pose_frame_id,
+        )
         self._target_box_pose_pub.publish(target_box_pose_msg)
 
         target_root_center = self._default_target_root_center.copy()
@@ -207,7 +288,8 @@ class VLMClientNode(Node):
         target_root_pose_msg = self._pose_stamped_from(
             center=target_root_center,
             quat_wxyz=target_root_quat,
-            stamp=response.image_stamp,
+            stamp=pose_stamp,
+            frame_id=pose_frame_id,
         )
         self._target_root_pose_pub.publish(target_root_pose_msg)
 
@@ -229,7 +311,13 @@ class VLMClientNode(Node):
         self._box_forward_axis_pub.publish(forward_axis_msg)
 
         self.get_logger().info(
-            f"Published retarget context for keyframe: {response.next_keyframe}, target_box_quat={target_box_quat.tolist()}, box_forward_axis={self.box_forward_axis}"
+            "Published retarget context for keyframe: %s, current_box_source=%s, target_box_quat=%s, box_forward_axis=%s"
+            % (
+                response.next_keyframe,
+                "actual_box_pose" if self._has_actual_box_pose else "configured_fallback",
+                target_box_quat.tolist(),
+                self.box_forward_axis,
+            )
         )
 
 
@@ -270,6 +358,7 @@ def main(args: list[str] | None = None) -> None:
         if not response.success:
             raise RuntimeError(response.error_message)
 
+        node.wait_for_actual_box_pose(float(node.get_parameter("actual_box_pose_timeout_sec").value))
         node.publish_planner_outputs(response)
         rclpy.spin_once(node, timeout_sec=0.05)
 

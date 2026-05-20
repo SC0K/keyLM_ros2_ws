@@ -172,6 +172,7 @@ class KeyframeRetargeterNode(Node):
         self.declare_parameter("box_forward_axis_topic", "/vlm/box_forward_axis")
         self.declare_parameter("retargeted_keyframe_topic", "/retargeter/output_keyframe")
         self.declare_parameter("retargeted_info_topic", "/retargeter/output_info")
+        self.declare_parameter("retargeted_publish_rate_hz", 5.0)
         self.declare_parameter("library_dir", "")
         self.declare_parameter("box_size_xyz", [0.3, 0.3, 0.3])
         self.declare_parameter("box_hold_forward_axis", "x")
@@ -216,11 +217,11 @@ class KeyframeRetargeterNode(Node):
         self._library_dir = self._resolve_library_dir(configured_library_dir)
 
         self._object_to_manipulate = True
-        self._current_box_center = np.array([0.7, 0.0, self._box_size_xyz[2] * 0.5], dtype=np.float64)
+        self._current_box_center = np.array([10.0, 10.0, self._box_size_xyz[2] * 0.5], dtype=np.float64)
         self._current_box_quat_wxyz = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
-        self._target_box_center = np.array([1.7, 0.0, self._box_size_xyz[2] * 0.5], dtype=np.float64)
+        self._target_box_center = np.array([11.0, 10.0, self._box_size_xyz[2] * 0.5], dtype=np.float64)
         self._target_box_quat_wxyz = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
-        self._target_root_center = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        self._target_root_center = np.array([0.0, 0.0, 0.0], dtype=np.float64)
         self._target_root_quat_wxyz = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
         self._pending_keyframe_name: str | None = None
         self._has_object_flag = False
@@ -228,6 +229,9 @@ class KeyframeRetargeterNode(Node):
         self._has_target_box_pose = False
         self._has_target_root_pose = False
         self._has_box_forward_axis = False
+        self._latest_retargeted_keyframe_data: list[int] | None = None
+        self._latest_retargeted_info_data: str | None = None
+        self._latest_retargeted_keyframe_name: str | None = None
 
         self.create_subscription(String, selected_keyframe_topic, self._on_selected_keyframe, 10)
         self.create_subscription(Bool, object_to_manipulate_topic, self._on_object_flag, 10)
@@ -237,12 +241,21 @@ class KeyframeRetargeterNode(Node):
         self.create_subscription(String, box_forward_axis_topic, self._on_box_forward_axis, 10)
         self._retargeted_keyframe_pub = self.create_publisher(UInt8MultiArray, retargeted_keyframe_topic, 10)
         self._retargeted_info_pub = self.create_publisher(String, retargeted_info_topic, 10)
+        retargeted_publish_rate_hz = float(self.get_parameter("retargeted_publish_rate_hz").value)
+        if retargeted_publish_rate_hz > 0.0:
+            self._retargeted_publish_timer = self.create_timer(
+                1.0 / retargeted_publish_rate_hz,
+                self._publish_latest_retargeted_keyframe,
+            )
+        else:
+            self._retargeted_publish_timer = None
 
         self.get_logger().info(
-            "Retargeter ready. Keyframes: %s. target_forward_axis=%s"
+            "Retargeter ready. Keyframes: %s. target_forward_axis=%s. republish_rate=%.2f Hz"
             % (
                 self._library_dir,
                 self._box_hold_forward_axis,
+                retargeted_publish_rate_hz,
             )
         )
 
@@ -275,6 +288,12 @@ class KeyframeRetargeterNode(Node):
         self._current_box_center, self._current_box_quat_wxyz = _pose_to_arrays(msg)
         self._has_current_box_pose = True
         self._maybe_process_pending_keyframe()
+        # Also reprocess the last retargeted keyframe to match the new box pose
+        if self._latest_retargeted_keyframe_name is not None:
+            try:
+                self._process_keyframe(self._latest_retargeted_keyframe_name)
+            except Exception as exc:
+                self.get_logger().error(f"Failed retargeting keyframe '{self._latest_retargeted_keyframe_name}' on box pose update: {exc}")
 
     def _on_target_box_pose(self, msg: PoseStamped) -> None:
         self._target_box_center, self._target_box_quat_wxyz = _pose_to_arrays(msg)
@@ -312,12 +331,9 @@ class KeyframeRetargeterNode(Node):
             mode = self._retarget_root_only(payload)
         payload_bytes = self._serialize_payload(payload)
 
-        out_msg = UInt8MultiArray()
-        out_msg.data = list(payload_bytes)
-        self._retargeted_keyframe_pub.publish(out_msg)
-
-        info_msg = String()
-        info_msg.data = json.dumps(
+        self._latest_retargeted_keyframe_data = list(payload_bytes)
+        self._latest_retargeted_keyframe_name = keyframe_name
+        self._latest_retargeted_info_data = json.dumps(
             {
                 "input_keyframe": keyframe_name,
                 "serialized_npz_bytes": len(payload_bytes),
@@ -325,8 +341,21 @@ class KeyframeRetargeterNode(Node):
                 "object_to_manipulate": bool(self._object_to_manipulate),
             }
         )
-        self._retargeted_info_pub.publish(info_msg)
+        self._publish_latest_retargeted_keyframe()
         self.get_logger().info(f"Retargeted {keyframe_name} (in-memory publish, {mode})")
+
+    def _publish_latest_retargeted_keyframe(self) -> None:
+        if self._latest_retargeted_keyframe_data is None:
+            return
+
+        out_msg = UInt8MultiArray()
+        out_msg.data = self._latest_retargeted_keyframe_data
+        self._retargeted_keyframe_pub.publish(out_msg)
+
+        if self._latest_retargeted_info_data is not None:
+            info_msg = String()
+            info_msg.data = self._latest_retargeted_info_data
+            self._retargeted_info_pub.publish(info_msg)
 
     def _maybe_process_pending_keyframe(self) -> None:
         if self._pending_keyframe_name is None:
@@ -436,7 +465,7 @@ class KeyframeRetargeterNode(Node):
         if "object_position_xyz" in payload and "object_quat_wxyz" in payload:
             src_center = np.asarray(payload["object_position_xyz"], dtype=np.float64).copy()
             src_quat = np.asarray(payload["object_quat_wxyz"], dtype=np.float64).copy()
-            self.get_logger().info(f"Retargeting with object. src_center={src_center}, src_quat={src_quat}")
+            self.get_logger().info(f"Retargeting with object. src_center={src_center}, src_quat={src_quat}, dest_center={dst_center}, dst_quat={dst_quat}")
             if np.linalg.norm(src_quat) < 1e-12:
                 src_quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
         else:

@@ -49,7 +49,7 @@ class MujocoVisualizerNode(Node):
 
         self.declare_parameter("robot", "g1")
         self.declare_parameter("robot_xml", "")
-        self.declare_parameter("current_box_pose_topic", "/vlm/current_box_pose")
+        self.declare_parameter("current_box_pose_topic", "/actual_box_pose")
         self.declare_parameter("target_box_pose_topic", "/vlm/target_box_pose")
         self.declare_parameter("retargeted_keyframe_topic", "/retargeter/output_keyframe")
         self.declare_parameter("box_size_xyz", [0.3, 0.3, 0.3])
