@@ -1,0 +1,3 @@
+[submodule "src/crl-humanoid-ros"]
+	path = src/crl-humanoid-ros
+	url = https://gitlab.inf.ethz.ch/crl/crl-humanoid-ros
