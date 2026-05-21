@@ -32,7 +32,6 @@ _AXIS_TO_LOCAL_VEC = {
     "-z": np.array([0.0, 0.0, -1.0], dtype=np.float64),
 }
 
-
 def _quat_wxyz_multiply(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
     w1, x1, y1, z1 = q1
     w2, x2, y2, z2 = q2
@@ -317,11 +316,28 @@ class KeyframeRetargeterNode(Node):
     def _required_info_ready(self, keyframe_name: str) -> bool:
         if not self._has_object_flag:
             return False
+
+        # Root-only mode does not need box poses.
         if not self._object_to_manipulate:
             return self._has_target_root_pose
+
+        # Only root pose is used here.
         if keyframe_name == "stand_before_pick":
-            return self._has_target_root_pose and self._has_box_forward_axis
-        return self._has_current_box_pose and self._has_target_box_pose and self._has_box_forward_axis
+            return self._has_target_root_pose
+
+        # Pick keyframes only need the actual/current box pose.
+        if keyframe_name in {"crouch_to_pick", "stand_after_pick"}:
+            return self._has_current_box_pose and self._has_box_forward_axis
+
+        # Place keyframes only need the target box pose.
+        if keyframe_name in {"stand_before_place", "crouch_to_place"}:
+            return self._has_target_box_pose and self._has_box_forward_axis
+
+        # This keyframe does not retarget to a box.
+        if keyframe_name == "stand_after_place":
+            return True
+
+        return True
 
     def _process_keyframe(self, keyframe_name: str) -> None:
         payload = self._load_payload(keyframe_name)
@@ -601,10 +617,12 @@ class KeyframeRetargeterNode(Node):
             return "ik_to_current_box_stand_after_pick"
 
         if keyframe_name == "stand_before_pick":
-            # For stand_before_pick we only control robot root pose from VLM.
             self._apply_root_pose(payload, self._target_root_center, self._target_root_quat_wxyz)
-            payload["object_position_xyz"] = self._current_box_center.astype(payload["object_position_xyz"].dtype)
-            payload["object_quat_wxyz"] = self._current_box_quat_wxyz.astype(payload["object_quat_wxyz"].dtype)
+
+            if self._has_current_box_pose:
+                payload["object_position_xyz"] = self._current_box_center.astype(payload["object_position_xyz"].dtype)
+                payload["object_quat_wxyz"] = self._current_box_quat_wxyz.astype(payload["object_quat_wxyz"].dtype)
+
             return "stand_before_pick_root_from_vlm"
 
         if keyframe_name == "stand_before_place":
