@@ -91,7 +91,7 @@ class VLMClientNode(Node):
         self.declare_parameter("current_box_center", [0.7, 0.5, 0.15])
         self.declare_parameter("current_box_quat_wxyz", [1.0, 0.0, 0.0, 0.0])
         self.declare_parameter("actual_box_pose_timeout_sec", 2.0)
-        self.declare_parameter("box_size_xyz", [0.3, 0.3, 0.3])
+        self.declare_parameter("box_size_xyz", [0.33, 0.33, 0.33])
         self.declare_parameter("default_place_distance_m", 1.6)
         self.declare_parameter("stand_before_pick_offset_m", 0.2)
         self.declare_parameter("min_stand_root_height_m", 0.78)
@@ -219,13 +219,19 @@ class VLMClientNode(Node):
     def publish_planner_outputs(self, response: VLMQuery.Response) -> None:
         pose_stamp = self._current_box_pose_stamp if self._current_box_pose_stamp is not None else response.image_stamp
         pose_frame_id = self._current_box_frame_id or "world"
+        object_to_manipulate = bool(response.object_in_manipulation)
 
         keyframe_msg = String()
-        keyframe_msg.data = response.next_keyframe
+        keyframe_msg.data = json.dumps(
+            {
+                "keyframe": response.next_keyframe,
+                "object_to_manipulate": object_to_manipulate,
+            }
+        )
         self._selected_keyframe_pub.publish(keyframe_msg)
 
         object_flag_msg = Bool()
-        object_flag_msg.data = bool(response.object_in_manipulation)
+        object_flag_msg.data = object_to_manipulate
         self._object_to_manipulate_pub.publish(object_flag_msg)
 
         current_box_pose_msg = self._pose_stamped_from(
