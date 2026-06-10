@@ -10,7 +10,8 @@ import numpy as np
 import rclpy
 from geometry_msgs.msg import PoseStamped
 from rclpy.node import Node
-from std_msgs.msg import Bool, String, UInt8MultiArray
+
+from lm_interfaces.srv import RetargetKeyframe
 
 from lm.keyframe_box_retarget import (
     BoxFrame,
@@ -163,15 +164,7 @@ class KeyframeRetargeterNode(Node):
     def __init__(self) -> None:
         super().__init__("keyframe_retargeter_node")
 
-        self.declare_parameter("selected_keyframe_topic", "/vlm/selected_keyframe")
-        self.declare_parameter("object_to_manipulate_topic", "/vlm/object_to_manipulate")
-        self.declare_parameter("current_box_pose_topic", "/vlm/current_box_pose")
-        self.declare_parameter("target_box_pose_topic", "/vlm/target_box_pose")
-        self.declare_parameter("target_root_pose_topic", "/vlm/target_root_pose")
-        self.declare_parameter("box_forward_axis_topic", "/vlm/box_forward_axis")
-        self.declare_parameter("retargeted_keyframe_topic", "/retargeter/output_keyframe")
-        self.declare_parameter("retargeted_info_topic", "/retargeter/output_info")
-        self.declare_parameter("retargeted_publish_rate_hz", 5.0)
+        self.declare_parameter("retarget_keyframe_service", "/retargeter/generate_keyframe")
         self.declare_parameter("library_dir", "")
         self.declare_parameter("box_size_xyz", [0.33, 0.33, 0.33])
         self.declare_parameter("box_hold_forward_axis", "x")
@@ -180,14 +173,7 @@ class KeyframeRetargeterNode(Node):
         self.declare_parameter("robot", "g1")
         self.declare_parameter("robot_xml", "")
 
-        selected_keyframe_topic = self.get_parameter("selected_keyframe_topic").value
-        object_to_manipulate_topic = self.get_parameter("object_to_manipulate_topic").value
-        current_box_pose_topic = self.get_parameter("current_box_pose_topic").value
-        target_box_pose_topic = self.get_parameter("target_box_pose_topic").value
-        target_root_pose_topic = self.get_parameter("target_root_pose_topic").value
-        box_forward_axis_topic = self.get_parameter("box_forward_axis_topic").value
-        retargeted_keyframe_topic = self.get_parameter("retargeted_keyframe_topic").value
-        retargeted_info_topic = self.get_parameter("retargeted_info_topic").value
+        retarget_keyframe_service = str(self.get_parameter("retarget_keyframe_service").value)
         self._box_size_xyz = np.asarray(self.get_parameter("box_size_xyz").value, dtype=np.float64)
         self._box_hold_forward_axis = _normalize_axis_label(
             str(self.get_parameter("box_hold_forward_axis").value)
@@ -216,48 +202,30 @@ class KeyframeRetargeterNode(Node):
         self._library_dir = self._resolve_library_dir(configured_library_dir)
 
         self._object_to_manipulate = True
-        self._pending_keyframe_object_to_manipulate = True
-        self._pending_keyframe_object_embedded = False
         self._current_box_center = np.array([10.0, 10.0, self._box_size_xyz[2] * 0.5], dtype=np.float64)
         self._current_box_quat_wxyz = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
         self._target_box_center = np.array([11.0, 10.0, self._box_size_xyz[2] * 0.5], dtype=np.float64)
         self._target_box_quat_wxyz = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
         self._target_root_center = np.array([0.0, 0.0, 0.0], dtype=np.float64)
         self._target_root_quat_wxyz = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
-        self._pending_keyframe_name: str | None = None
-        self._has_object_flag = False
         self._has_current_box_pose = False
-        self._has_target_box_pose = False
-        self._has_target_root_pose = False
-        self._has_box_forward_axis = False
         self._latest_retargeted_keyframe_data: list[int] | None = None
         self._latest_retargeted_info_data: str | None = None
         self._latest_retargeted_keyframe_name: str | None = None
         self._latest_retargeted_object_to_manipulate = True
 
-        self.create_subscription(String, selected_keyframe_topic, self._on_selected_keyframe, 10)
-        self.create_subscription(Bool, object_to_manipulate_topic, self._on_object_flag, 10)
-        self.create_subscription(PoseStamped, current_box_pose_topic, self._on_current_box_pose, 10)
-        self.create_subscription(PoseStamped, target_box_pose_topic, self._on_target_box_pose, 10)
-        self.create_subscription(PoseStamped, target_root_pose_topic, self._on_target_root_pose, 10)
-        self.create_subscription(String, box_forward_axis_topic, self._on_box_forward_axis, 10)
-        self._retargeted_keyframe_pub = self.create_publisher(UInt8MultiArray, retargeted_keyframe_topic, 10)
-        self._retargeted_info_pub = self.create_publisher(String, retargeted_info_topic, 10)
-        retargeted_publish_rate_hz = float(self.get_parameter("retargeted_publish_rate_hz").value)
-        if retargeted_publish_rate_hz > 0.0:
-            self._retargeted_publish_timer = self.create_timer(
-                1.0 / retargeted_publish_rate_hz,
-                self._publish_latest_retargeted_keyframe,
-            )
-        else:
-            self._retargeted_publish_timer = None
+        self._service = self.create_service(
+            RetargetKeyframe,
+            retarget_keyframe_service,
+            self._on_retarget_keyframe_request,
+        )
 
         self.get_logger().info(
-            "Retargeter ready. Keyframes: %s. target_forward_axis=%s. republish_rate=%.2f Hz"
+            "Retargeter service ready. service=%s. keyframes=%s. target_forward_axis=%s"
             % (
+                retarget_keyframe_service,
                 self._library_dir,
                 self._box_hold_forward_axis,
-                retargeted_publish_rate_hz,
             )
         )
 
@@ -281,105 +249,7 @@ class KeyframeRetargeterNode(Node):
                 return candidate
         raise FileNotFoundError(f"Could not locate keyframe library in: {', '.join(str(c) for c in candidates)}")
 
-    def _on_object_flag(self, msg: Bool) -> None:
-        self._has_object_flag = True
-        if not self._pending_keyframe_object_embedded:
-            self._object_to_manipulate = bool(msg.data)
-            self._pending_keyframe_object_to_manipulate = self._object_to_manipulate
-        self._maybe_process_pending_keyframe()
-
-    def _on_current_box_pose(self, msg: PoseStamped) -> None:
-        self._current_box_center, self._current_box_quat_wxyz = _pose_to_arrays(msg)
-        self._has_current_box_pose = True
-        self._maybe_process_pending_keyframe()
-        # Also reprocess the last retargeted keyframe to match the new box pose
-        if self._latest_retargeted_keyframe_name is not None:
-            try:
-                self._process_keyframe(
-                    self._latest_retargeted_keyframe_name,
-                    self._latest_retargeted_object_to_manipulate,
-                )
-            except Exception as exc:
-                self.get_logger().error(f"Failed retargeting keyframe '{self._latest_retargeted_keyframe_name}' on box pose update: {exc}")
-
-    def _on_target_box_pose(self, msg: PoseStamped) -> None:
-        self._target_box_center, self._target_box_quat_wxyz = _pose_to_arrays(msg)
-        self._has_target_box_pose = True
-        self._maybe_process_pending_keyframe()
-
-    def _on_target_root_pose(self, msg: PoseStamped) -> None:
-        self._target_root_center, self._target_root_quat_wxyz = _pose_to_arrays(msg)
-        self._has_target_root_pose = True
-        self._maybe_process_pending_keyframe()
-
-    def _on_box_forward_axis(self, msg: String) -> None:
-        try:
-            self._box_hold_forward_axis = _normalize_axis_label(msg.data)
-            self._has_box_forward_axis = True
-            self.get_logger().info("Updated target forward axis to %s" % self._box_hold_forward_axis)
-            self._maybe_process_pending_keyframe()
-        except ValueError as exc:
-            self.get_logger().warn(str(exc))
-
-    def _required_info_ready(self, keyframe_name: str) -> bool:
-        if not self._has_object_flag:
-            return False
-
-        # Root-only mode does not need box poses.
-        if not self._object_to_manipulate:
-            return self._has_target_root_pose
-
-        # Only root pose is used here.
-        if keyframe_name == "stand_before_pick":
-            return self._has_target_root_pose
-
-        # Pick keyframes only need the actual/current box pose.
-        if keyframe_name in {"crouch_to_pick", "stand_after_pick"}:
-            return self._has_current_box_pose and self._has_box_forward_axis
-
-        # Place keyframes only need the target box pose.
-        if keyframe_name in {"stand_before_place", "crouch_to_place"}:
-            return self._has_target_box_pose and self._has_box_forward_axis
-
-        # This keyframe does not retarget to a box.
-        if keyframe_name == "stand_after_place":
-            return True
-
-        return True
-
-    @staticmethod
-    def _bool_from_payload_value(value: object) -> bool:
-        values = np.asarray(value).reshape(-1)
-        if values.size == 0:
-            return False
-        item = values[0].item() if hasattr(values[0], "item") else values[0]
-        if isinstance(item, str):
-            return item.strip().lower() in {"1", "true", "yes", "y", "on"}
-        return bool(item)
-
-    @staticmethod
-    def _parse_selected_keyframe_message(data: str) -> tuple[str, bool | None]:
-        text = data.strip()
-        if not text:
-            return "", None
-        try:
-            payload = json.loads(text)
-        except json.JSONDecodeError:
-            return text, None
-        if not isinstance(payload, dict):
-            return text, None
-
-        keyframe_name = str(
-            payload.get("keyframe")
-            or payload.get("next_keyframe")
-            or payload.get("name")
-            or ""
-        ).strip()
-        if "object_to_manipulate" not in payload:
-            return keyframe_name, None
-        return keyframe_name, KeyframeRetargeterNode._bool_from_payload_value(payload["object_to_manipulate"])
-
-    def _process_keyframe(self, keyframe_name: str, object_to_manipulate: bool | None = None) -> None:
+    def _process_keyframe(self, keyframe_name: str, object_to_manipulate: bool | None = None) -> tuple[bytes, str]:
         if object_to_manipulate is not None:
             self._object_to_manipulate = bool(object_to_manipulate)
         payload = self._load_payload(keyframe_name)
@@ -393,7 +263,7 @@ class KeyframeRetargeterNode(Node):
         self._latest_retargeted_keyframe_data = list(payload_bytes)
         self._latest_retargeted_keyframe_name = keyframe_name
         self._latest_retargeted_object_to_manipulate = self._object_to_manipulate
-        self._latest_retargeted_info_data = json.dumps(
+        info_data = json.dumps(
             {
                 "input_keyframe": keyframe_name,
                 "serialized_npz_bytes": len(payload_bytes),
@@ -401,38 +271,43 @@ class KeyframeRetargeterNode(Node):
                 "object_to_manipulate": bool(self._object_to_manipulate),
             }
         )
-        self._publish_latest_retargeted_keyframe()
+        self._latest_retargeted_info_data = info_data
         self.get_logger().info(
             f"Retargeted {keyframe_name} "
-            f"(in-memory publish, {mode}, object_to_manipulate={self._object_to_manipulate})"
+            f"(service response, {mode}, object_to_manipulate={self._object_to_manipulate})"
         )
+        return payload_bytes, info_data
 
-    def _publish_latest_retargeted_keyframe(self) -> None:
-        if self._latest_retargeted_keyframe_data is None:
-            return
+    def _on_retarget_keyframe_request(
+        self,
+        request: RetargetKeyframe.Request,
+        response: RetargetKeyframe.Response,
+    ) -> RetargetKeyframe.Response:
+        keyframe_name = request.keyframe_name.strip()
+        if not keyframe_name:
+            response.success = False
+            response.error_message = "keyframe_name is empty"
+            return response
 
-        out_msg = UInt8MultiArray()
-        out_msg.data = self._latest_retargeted_keyframe_data
-        self._retargeted_keyframe_pub.publish(out_msg)
-
-        if self._latest_retargeted_info_data is not None:
-            info_msg = String()
-            info_msg.data = self._latest_retargeted_info_data
-            self._retargeted_info_pub.publish(info_msg)
-
-    def _maybe_process_pending_keyframe(self) -> None:
-        if self._pending_keyframe_name is None:
-            return
-        if not self._required_info_ready(self._pending_keyframe_name):
-            return
-        keyframe_name = self._pending_keyframe_name
-        object_to_manipulate = self._pending_keyframe_object_to_manipulate
-        self._pending_keyframe_name = None
-        self._pending_keyframe_object_embedded = False
         try:
-            self._process_keyframe(keyframe_name, object_to_manipulate)
+            self._object_to_manipulate = bool(request.object_to_manipulate)
+            self._current_box_center, self._current_box_quat_wxyz = _pose_to_arrays(request.current_box_pose)
+            self._target_box_center, self._target_box_quat_wxyz = _pose_to_arrays(request.target_box_pose)
+            self._target_root_center, self._target_root_quat_wxyz = _pose_to_arrays(request.target_root_pose)
+            self._has_current_box_pose = True
+            self._box_hold_forward_axis = _normalize_axis_label(request.box_forward_axis)
+            payload_bytes, info_data = self._process_keyframe(keyframe_name, self._object_to_manipulate)
+            response.success = True
+            response.error_message = ""
+            response.retargeted_keyframe = list(payload_bytes)
+            response.retargeted_info = info_data
         except Exception as exc:
-            self.get_logger().error(f"Failed retargeting keyframe '{keyframe_name}': {exc}")
+            response.success = False
+            response.error_message = str(exc)
+            response.retargeted_keyframe = []
+            response.retargeted_info = ""
+            self.get_logger().error(f"Failed retargeting service request for '{keyframe_name}': {exc}")
+        return response
 
     @staticmethod
     def _extract_body_arrays(payload: dict[str, np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
@@ -697,36 +572,16 @@ class KeyframeRetargeterNode(Node):
 
     def _retarget_root_only(self, payload: dict[str, np.ndarray]) -> str:
         self._apply_root_pose(payload, self._target_root_center, self._target_root_quat_wxyz)
-        if "object_pose" in payload:
-            payload["object_pose"] = np.zeros_like(payload["object_pose"])
-        if "object_position_xyz" in payload:
-            payload["object_position_xyz"] = np.zeros(3, dtype=payload["object_position_xyz"].dtype)
-        if "object_quat_wxyz" in payload:
-            payload["object_quat_wxyz"] = np.zeros(4, dtype=payload["object_quat_wxyz"].dtype)
+        for key in (
+            "object_pose",
+            "object_position_xyz",
+            "object_quat_wxyz",
+            "masked_goal_object_pos",
+            "masked_goal_object_quat",
+        ):
+            if key in payload:
+                payload[key] = np.zeros_like(payload[key])
         return "root_only_retarget"
-
-    def _on_selected_keyframe(self, msg: String) -> None:
-        keyframe_name, object_to_manipulate = self._parse_selected_keyframe_message(msg.data)
-        if not keyframe_name:
-            return
-
-        self._pending_keyframe_name = keyframe_name
-        self._pending_keyframe_object_embedded = object_to_manipulate is not None
-        if object_to_manipulate is not None:
-            self._pending_keyframe_object_to_manipulate = object_to_manipulate
-            self._object_to_manipulate = object_to_manipulate
-            self._has_object_flag = True
-        else:
-            self._pending_keyframe_object_to_manipulate = self._object_to_manipulate
-        if self._required_info_ready(keyframe_name):
-            self._maybe_process_pending_keyframe()
-        else:
-            self.get_logger().info(
-                f"Queued keyframe '{keyframe_name}' with "
-                f"object_to_manipulate={self._pending_keyframe_object_to_manipulate} "
-                "and waiting for required VLM context topics."
-            )
-
 
 def main(args: list[str] | None = None) -> None:
     rclpy.init(args=args)

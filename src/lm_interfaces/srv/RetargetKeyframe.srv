@@ -1,0 +1,11 @@
+string keyframe_name
+bool object_to_manipulate
+geometry_msgs/PoseStamped current_box_pose
+geometry_msgs/PoseStamped target_box_pose
+geometry_msgs/PoseStamped target_root_pose
+string box_forward_axis
+---
+bool success
+string error_message
+uint8[] retargeted_keyframe
+string retargeted_info

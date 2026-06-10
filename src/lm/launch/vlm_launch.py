@@ -15,7 +15,11 @@ def generate_launch_description() -> LaunchDescription:
     task_text = LaunchConfiguration("task_text")
     start_visualizer = LaunchConfiguration("start_visualizer")
     actual_box_pose_topic = LaunchConfiguration("actual_box_pose_topic")
-    current_box_pose_topic = LaunchConfiguration("current_box_pose_topic")
+    robot_root_pose_topic = LaunchConfiguration("robot_root_pose_topic")
+    monitor_topic = LaunchConfiguration("monitor_topic")
+    retarget_keyframe_service = LaunchConfiguration("retarget_keyframe_service")
+    retargeted_keyframe_topic = LaunchConfiguration("retargeted_keyframe_topic")
+    retargeted_info_topic = LaunchConfiguration("retargeted_info_topic")
 
     return LaunchDescription(
         [
@@ -25,8 +29,13 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("service_name", default_value="/vlm/query"),
             DeclareLaunchArgument("start_client", default_value="true"),
             DeclareLaunchArgument("client_delay_sec", default_value="2.0"),
+            # Real robot topics: actual_box_pose_topic="/red_box/pose", robot_root_pose_topic="/g1_torso/pose".
             DeclareLaunchArgument("actual_box_pose_topic", default_value="/actual_box_pose"),
-            DeclareLaunchArgument("current_box_pose_topic", default_value="/vlm/current_box_pose"),
+            DeclareLaunchArgument("robot_root_pose_topic", default_value=""),
+            DeclareLaunchArgument("monitor_topic", default_value="/g1_sim/monitor"),
+            DeclareLaunchArgument("retarget_keyframe_service", default_value="/retargeter/generate_keyframe"),
+            DeclareLaunchArgument("retargeted_keyframe_topic", default_value="/retargeter/output_keyframe"),
+            DeclareLaunchArgument("retargeted_info_topic", default_value="/retargeter/output_info"),
             DeclareLaunchArgument(
                 "task_text",
                 default_value="Pick up the box on the ground and place it on the table.",
@@ -64,7 +73,7 @@ def generate_launch_description() -> LaunchDescription:
                 output="screen",
                 parameters=[
                     {
-                        "current_box_pose_topic": current_box_pose_topic,
+                        "retarget_keyframe_service": retarget_keyframe_service,
                     }
                 ],
             ),
@@ -93,7 +102,11 @@ def generate_launch_description() -> LaunchDescription:
                         parameters=[
                             {
                                 "actual_box_pose_topic": actual_box_pose_topic,
-                                "current_box_pose_topic": current_box_pose_topic,
+                                "robot_root_pose_topic": robot_root_pose_topic,
+                                "monitor_topic": monitor_topic,
+                                "retarget_keyframe_service": retarget_keyframe_service,
+                                "retargeted_keyframe_topic": retargeted_keyframe_topic,
+                                "retargeted_info_topic": retargeted_info_topic,
                             }
                         ],
                     )
