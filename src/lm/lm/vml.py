@@ -27,6 +27,8 @@ _AXIS_TO_LOCAL_VEC = {
     "-z": np.array([0.0, 0.0, -1.0], dtype=np.float64),
 }
 
+_OBJECT_REQUIRED_KEYFRAMES = frozenset({"stand_before_place"})
+
 def _quat_wxyz_to_rotmat(q: np.ndarray) -> np.ndarray:
     q = np.asarray(q, dtype=np.float64)
     norm = np.linalg.norm(q)
@@ -150,6 +152,7 @@ class VLMClientNode(Node):
         )
         self.declare_parameter("default_place_distance_m", 1.6)
         self.declare_parameter("stand_before_pick_offset_m", 0.2)
+        self.declare_parameter("stand_after_pick_height_m", 1.0)
         self.declare_parameter("stand_before_place_height_m", 1.0)
         self.declare_parameter("min_stand_root_height_m", 0.78)
         self.declare_parameter("default_target_root_center", [2.3, 0.5, 0.78])  # TODO: find the correct target root pose for root mode (navifation)
@@ -202,6 +205,7 @@ class VLMClientNode(Node):
         self._last_object_to_manipulate = True
         self._default_place_distance_m = float(self.get_parameter("default_place_distance_m").value)
         self._stand_before_pick_offset_m = float(self.get_parameter("stand_before_pick_offset_m").value)
+        self._stand_after_pick_height_m = float(self.get_parameter("stand_after_pick_height_m").value)
         self._stand_before_place_height_m = float(self.get_parameter("stand_before_place_height_m").value)
         self._min_stand_root_height_m = float(self.get_parameter("min_stand_root_height_m").value)
         self._stationary_hold_sec = float(self.get_parameter("stationary_hold_sec").value)
@@ -609,6 +613,10 @@ class VLMClientNode(Node):
         place_target_center: np.ndarray,
         place_target_quat: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray]:
+        if action in ("stand_after_pick",):
+            target = self._current_box_center.copy()
+            target[2] = self._stand_after_pick_height_m
+            return target, self._current_box_quat_wxyz.copy()
         if action in ("stand_before_place",):
             target = np.asarray(place_target_center, dtype=np.float64).copy()
             target[2] = self._stand_before_place_height_m
@@ -746,7 +754,12 @@ class VLMClientNode(Node):
         pose_frame_id = self._current_box_frame_id or "world"
         # The service field is named object_in_manipulation for compatibility,
         # but the value is forwarded as the retargeter/controller object mask.
-        object_to_manipulate = bool(response.object_in_manipulation)
+        object_to_manipulate = bool(response.object_in_manipulation) or response.next_keyframe in _OBJECT_REQUIRED_KEYFRAMES
+        if object_to_manipulate and not bool(response.object_in_manipulation):
+            self.get_logger().info(
+                "Forcing object_to_manipulate=true for %s because this keyframe requires object-aware retargeting."
+                % response.next_keyframe
+            )
         if object_to_manipulate:
             self._update_box_forward_axis_from_robot_once()
 

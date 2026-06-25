@@ -35,6 +35,8 @@ _AXIS_TO_LOCAL_VEC = {
     "-z": np.array([0.0, 0.0, -1.0], dtype=np.float64),
 }
 
+_OBJECT_REQUIRED_KEYFRAMES = frozenset({"stand_before_place"})
+
 def _quat_wxyz_multiply(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
     w1, x1, y1, z1 = q1
     w2, x2, y2, z2 = q2
@@ -175,7 +177,8 @@ class KeyframeRetargeterNode(Node):
         )
         self.declare_parameter("box_hold_forward_axis", "x")
         self.declare_parameter("stand_before_pick_offset_m", 0.2)
-        self.declare_parameter("stand_before_place_height_m", 1.0)
+        self.declare_parameter("stand_after_pick_height_m", 0.9)
+        self.declare_parameter("stand_before_place_height_m", 0.9)
         self.declare_parameter("robot", "g1")
         self.declare_parameter("robot_xml", "")
 
@@ -185,6 +188,7 @@ class KeyframeRetargeterNode(Node):
             str(self.get_parameter("box_hold_forward_axis").value)
         )
         self._stand_before_pick_offset_m = float(self.get_parameter("stand_before_pick_offset_m").value)
+        self._stand_after_pick_height_m = float(self.get_parameter("stand_after_pick_height_m").value)
         self._stand_before_place_height_m = float(self.get_parameter("stand_before_place_height_m").value)
         robot_xml = str(self.get_parameter("robot_xml").value).strip()
         if robot_xml:
@@ -258,6 +262,8 @@ class KeyframeRetargeterNode(Node):
     def _process_keyframe(self, keyframe_name: str, object_to_manipulate: bool | None = None) -> tuple[bytes, str]:
         if object_to_manipulate is not None:
             self._object_to_manipulate = bool(object_to_manipulate)
+        if keyframe_name in _OBJECT_REQUIRED_KEYFRAMES:
+            self._object_to_manipulate = True
         payload = self._load_payload(keyframe_name)
         if self._object_to_manipulate:
             mode = self._retarget_for_box_task(keyframe_name, payload)
@@ -541,10 +547,12 @@ class KeyframeRetargeterNode(Node):
             return "ik_to_current_box_pick"
 
         if keyframe_name == "stand_after_pick":
-            self._apply_box_ik(payload, self._current_box_center, self._current_box_quat_wxyz)
-            payload["object_position_xyz"] = self._current_box_center.astype(payload["object_position_xyz"].dtype)
+            lifted_box_center = self._current_box_center.copy()
+            lifted_box_center[2] = self._stand_after_pick_height_m
+            self._apply_box_ik(payload, lifted_box_center, self._current_box_quat_wxyz)
+            payload["object_position_xyz"] = lifted_box_center.astype(payload["object_position_xyz"].dtype)
             payload["object_quat_wxyz"] = self._current_box_quat_wxyz.astype(payload["object_quat_wxyz"].dtype)
-            return "ik_to_current_box_stand_after_pick"
+            return "ik_to_lifted_box_stand_after_pick"
 
         if keyframe_name == "stand_before_pick":
             self._apply_root_pose(payload, self._target_root_center, self._target_root_quat_wxyz)

@@ -29,6 +29,8 @@ def generate_launch_description() -> LaunchDescription:
     robot_root_pose_topic = LaunchConfiguration("robot_root_pose_topic")
     monitor_topic = LaunchConfiguration("monitor_topic")
     box_size_xyz = LaunchConfiguration("box_size_xyz")
+    stand_after_pick_height_m = LaunchConfiguration("stand_after_pick_height_m")
+    stand_before_place_height_m = LaunchConfiguration("stand_before_place_height_m")
     tracking_error_topic = LaunchConfiguration("tracking_error_topic")
     retarget_keyframe_service = LaunchConfiguration("retarget_keyframe_service")
     retargeted_keyframe_topic = LaunchConfiguration("retargeted_keyframe_topic")
@@ -58,6 +60,8 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("monitor_topic", default_value="/g1_sim/monitor"),
             DeclareLaunchArgument("tracking_error_topic", default_value="/tracking_errors"),
             DeclareLaunchArgument("box_size_xyz", default_value="0.3 0.3 0.3"),
+            DeclareLaunchArgument("stand_after_pick_height_m", default_value="0.8"),
+            DeclareLaunchArgument("stand_before_place_height_m", default_value="0.8"),
             DeclareLaunchArgument("retarget_keyframe_service", default_value="/retargeter/generate_keyframe"),
             DeclareLaunchArgument("retargeted_keyframe_topic", default_value="/retargeter/output_keyframe"),
             DeclareLaunchArgument("retargeted_info_topic", default_value="/retargeter/output_info"),
@@ -114,6 +118,8 @@ def generate_launch_description() -> LaunchDescription:
                     {
                         "retarget_keyframe_service": retarget_keyframe_service,
                         "box_size_xyz": box_size_xyz,
+                        "stand_after_pick_height_m": stand_after_pick_height_m,
+                        "stand_before_place_height_m": stand_before_place_height_m,
                     }
                 ],
             ),
@@ -146,6 +152,8 @@ def generate_launch_description() -> LaunchDescription:
                                 "monitor_topic": monitor_topic,
                                 "tracking_error_topic": tracking_error_topic,
                                 "box_size_xyz": box_size_xyz,
+                                "stand_after_pick_height_m": stand_after_pick_height_m,
+                                "stand_before_place_height_m": stand_before_place_height_m,
                                 "retarget_keyframe_service": retarget_keyframe_service,
                                 "retargeted_keyframe_topic": retargeted_keyframe_topic,
                                 "retargeted_info_topic": retargeted_info_topic,

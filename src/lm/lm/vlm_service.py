@@ -66,6 +66,7 @@ The JSON format is:
 Normally after successfully placing the object, choose the final stand keyframe and set task_completion true only if planner_context.measured_task_completion is true and the selected keyframe leaves the robot in the final standby state.
 The object_in_manipulation boolean controls whether object target/current-object observations are active in the policy.
 Set object_in_manipulation true for keyframes that need object-aware hand or object target retargeting: crouch_to_pick, stand_after_pick, stand_before_place, and crouch_to_place.
+stand_before_place is not root-only: set object_in_manipulation true because the robot should still hold the box at the target x/y position with the configured default hold height.
 Set object_in_manipulation false for pure standing/root/standby keyframes that do not need the object mask, especially stand_before_pick and the final stand_after_place after the object has been placed.
 For standing keyframes that still carry or position the object, keep object_in_manipulation true.
 
