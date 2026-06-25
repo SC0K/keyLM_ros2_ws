@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import base64
+import threading
 import time
 from typing import Literal
 
 import rclpy
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 
@@ -21,7 +24,7 @@ except ImportError:
     CvBridge = None
 
 
-MODEL_NAME = "qwen3.5:9b"
+MODEL_NAME = "qwen3.6:27b"
 
 AllowedKeyframe = Literal[
     "crouch_to_pick",
@@ -43,23 +46,34 @@ SYSTEM_PROMPT = """
 You are a high-level robot planner.
 Your job is to choose exactly one next action keyframe from the allowed motion library.
 A image of the current scene is provided to help you understand the environment, but you must choose from the allowed keyframes.
-You need to decide if the task is completed after executing the chosen keyframe, and whether the robot is currently manipulating the object.
-at the end of the task, the robot should be in a "stand" keyframe with the object placed at the target location. After placing the object the robot can only stand up witout the object.    
+You need to decide if the task is completed after executing the chosen keyframe, and whether the selected keyframe should use the object-aware retargeting/controller mask.
+The user prompt includes planner_context as JSON. Treat that JSON as measured execution state.
+The planner_context.previous_action field is "none" on the first request; otherwise it is the keyframe selected by the previous VLM response.
+The planner_context.previous_action_finished field is true only after the robot and object have been stationary below configured thresholds.
+The planner_context.previous_action_success field is true only when the tracked mean body error, root pose error, and object pose error are below their configured thresholds.
+The planner_context.measured_task_completion field is true only when the actual object pose is within threshold of the target object pose.
+If previous_action_finished is false, do not advance to a new semantic phase.
+If previous_action_success is false, choose the safest retry/recovery keyframe from the allowed list.
+At the end of the task, the robot should be in a "stand" keyframe with the object placed at the target location. After placing the object, the robot can only stand up without the object.
 Your response must follow exactly the JSON schema provided, and only include the allowed keyframes.
 The JSON format is:
 {
     "next_keyframe": string,  // one of the allowed keyframes
-    "object_in_manipulation": boolean,  // whether the robot is currently holding/manipulating the object
+    "object_in_manipulation": boolean,  // forwarded as object_to_manipulate for retargeting and policy observation
     "task_completion": boolean  // whether the task is completed after executing the chosen keyframe
 }
 
-Normally after successfully placing the object the task is completed and the robot return to standing pose for stand by.
+Normally after successfully placing the object, choose the final stand keyframe and set task_completion true only if planner_context.measured_task_completion is true and the selected keyframe leaves the robot in the final standby state.
+The object_in_manipulation boolean controls whether object target/current-object observations are active in the policy.
+Set object_in_manipulation true for keyframes that need object-aware hand or object target retargeting: crouch_to_pick, stand_after_pick, stand_before_place, and crouch_to_place.
+Set object_in_manipulation false for pure standing/root/standby keyframes that do not need the object mask, especially stand_before_pick and the final stand_after_place after the object has been placed.
+For standing keyframes that still carry or position the object, keep object_in_manipulation true.
 
 Rules:
 - Return only valid JSON matching the provided schema.
 - Do not output markdown, explanations, or code fences.
 - Do not invent actions outside the allowed keyframes.
-- Prefer safer actions like inspection or repositioning if the scene is uncertain.
+- Use only planner_context and the image; do not assume an action succeeded if planner_context.previous_action_success is false or null.
 """.strip()
 
 
@@ -68,7 +82,7 @@ def build_user_prompt(task_text: str, planner_context: str, allowed_keyframes: l
 Task:
 {task_text}
 
-Planner context:
+Planner context JSON:
 {planner_context}
 
 Allowed keyframes:
@@ -82,9 +96,13 @@ class VLMServiceNode(Node):
 
         self.declare_parameter("service_name", "/vlm/query")
         self.declare_parameter("image_topic", "/camera/image_raw")
+        self.declare_parameter("request_image_topic", "/vlm/request_image")
+        self.declare_parameter("image_wait_timeout_sec", 10.0)
 
         service_name = self.get_parameter("service_name").get_parameter_value().string_value
         image_topic = self.get_parameter("image_topic").get_parameter_value().string_value
+        request_image_topic = self.get_parameter("request_image_topic").get_parameter_value().string_value
+        self._image_wait_timeout_sec = float(self.get_parameter("image_wait_timeout_sec").value)
 
         self._allowed_keyframes = [
             "crouch_to_pick",
@@ -96,14 +114,34 @@ class VLMServiceNode(Node):
         ]
         self._latest_image_bgr = None
         self._latest_image_stamp = None
+        self._latest_image_frame_id = ""
+        self._latest_image_sequence = 0
+        self._image_condition = threading.Condition()
+        self._callback_group = ReentrantCallbackGroup()
         self._bridge = CvBridge() if CvBridge is not None else None
         self._cv_bridge_error_logged = False
 
-        self._image_sub = self.create_subscription(Image, image_topic, self._image_callback, 10)
-        self._srv = self.create_service(VLMQuery, service_name, self._handle_query)
+        self._image_sub = self.create_subscription(
+            Image,
+            image_topic,
+            self._image_callback,
+            10,
+            callback_group=self._callback_group,
+        )
+        self._request_image_pub = self.create_publisher(Image, request_image_topic, 10)
+        self._srv = self.create_service(
+            VLMQuery,
+            service_name,
+            self._handle_query,
+            callback_group=self._callback_group,
+        )
 
         self.get_logger().info(f"VLM service ready at {service_name}")
         self.get_logger().info(f"Subscribed to image topic: {image_topic}")
+        self.get_logger().info(f"Publishing request images to: {request_image_topic}")
+        self.get_logger().info(
+            f"Waiting up to {self._image_wait_timeout_sec:.1f}s for a fresh camera frame per request"
+        )
         self.get_logger().info(f"Using model: {MODEL_NAME}")
 
     def _image_callback(self, msg: Image) -> None:
@@ -114,10 +152,46 @@ class VLMServiceNode(Node):
             return
 
         try:
-            self._latest_image_bgr = self._bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
-            self._latest_image_stamp = msg.header.stamp
+            image_bgr = self._bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
         except Exception as exc:
             self.get_logger().error(f"Failed to convert/store camera frame: {exc}")
+            return
+
+        with self._image_condition:
+            self._latest_image_bgr = image_bgr
+            self._latest_image_stamp = msg.header.stamp
+            self._latest_image_frame_id = msg.header.frame_id
+            self._latest_image_sequence += 1
+            self._image_condition.notify_all()
+
+    def _current_image_sequence(self) -> int:
+        with self._image_condition:
+            return self._latest_image_sequence
+
+    def _copy_next_image_after(self, image_sequence: int, timeout_sec: float):
+        deadline = time.monotonic() + max(0.0, timeout_sec)
+        with self._image_condition:
+            while (
+                self._latest_image_sequence <= image_sequence
+                or self._latest_image_stamp is None
+                or self._latest_image_bgr is None
+            ):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    return None, None, ""
+                self._image_condition.wait(timeout=remaining)
+            return self._latest_image_bgr.copy(), self._latest_image_stamp, self._latest_image_frame_id
+
+    def _publish_request_image(self, image_bgr, image_stamp, frame_id: str) -> None:
+        if self._bridge is None:
+            return
+        try:
+            msg = self._bridge.cv2_to_imgmsg(image_bgr, encoding="bgr8")
+            msg.header.stamp = image_stamp
+            msg.header.frame_id = frame_id
+            self._request_image_pub.publish(msg)
+        except Exception as exc:
+            self.get_logger().warn(f"Failed to publish VLM request image: {exc}")
 
     def _query_vlm(self, image_bgr, task_text: str, planner_context: str) -> tuple[KeyframeDecision, str, float]:
         user_prompt = build_user_prompt(
@@ -170,14 +244,24 @@ class VLMServiceNode(Node):
             response.success = False
             response.error_message = "task_text cannot be empty"
             return response
-        if self._latest_image_stamp is None:
+
+        request_start_image_sequence = self._current_image_sequence()
+        request_image_bgr, request_image_stamp, request_image_frame_id = self._copy_next_image_after(
+            request_start_image_sequence,
+            self._image_wait_timeout_sec,
+        )
+        if request_image_stamp is None or request_image_bgr is None:
             response.success = False
-            response.error_message = "No camera image received yet from subscribed topic"
+            response.error_message = (
+                "No fresh camera image received after VLM request started "
+                f"after waiting {self._image_wait_timeout_sec:.1f}s"
+            )
             return response
 
         try:
+            self._publish_request_image(request_image_bgr, request_image_stamp, request_image_frame_id)
             decision, raw_json, latency_sec = self._query_vlm(
-                image_bgr=self._latest_image_bgr,
+                image_bgr=request_image_bgr,
                 task_text=task_text,
                 planner_context=planner_context,
             )
@@ -188,7 +272,7 @@ class VLMServiceNode(Node):
             response.task_completion = decision.task_completion
             response.raw_json = raw_json
             response.latency_sec = float(latency_sec)
-            response.image_stamp = self._latest_image_stamp
+            response.image_stamp = request_image_stamp
             self.get_logger().info(f"VLM decision={decision.next_keyframe} latency={latency_sec:.3f}s")
         except ValidationError as exc:
             response.success = False
@@ -202,11 +286,14 @@ class VLMServiceNode(Node):
 def main(args: list[str] | None = None) -> None:
     rclpy.init(args=args)
     node = VLMServiceNode()
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
+        executor.shutdown()
         node.destroy_node()
         rclpy.shutdown()
 

@@ -7,16 +7,29 @@ from launch_ros.actions import Node
 
 def generate_launch_description() -> LaunchDescription:
     image_topic = LaunchConfiguration("image_topic")
-    image_path = LaunchConfiguration("image_path")
     rate_hz = LaunchConfiguration("rate_hz")
+    camera_backend = LaunchConfiguration("camera_backend")
+    real_image_topic = LaunchConfiguration("real_image_topic")
+    camera_width = LaunchConfiguration("camera_width")
+    camera_height = LaunchConfiguration("camera_height")
+    camera_frame_id = LaunchConfiguration("camera_frame_id")
+    camera_robot_xml = LaunchConfiguration("camera_robot_xml")
+    camera_name = LaunchConfiguration("camera_name")
+    camera_lookat = LaunchConfiguration("camera_lookat")
+    camera_distance = LaunchConfiguration("camera_distance")
+    camera_azimuth = LaunchConfiguration("camera_azimuth")
+    camera_elevation = LaunchConfiguration("camera_elevation")
     service_name = LaunchConfiguration("service_name")
     start_client = LaunchConfiguration("start_client")
     client_delay_sec = LaunchConfiguration("client_delay_sec")
     task_text = LaunchConfiguration("task_text")
     start_visualizer = LaunchConfiguration("start_visualizer")
+    start_camera = LaunchConfiguration("start_camera")
     actual_box_pose_topic = LaunchConfiguration("actual_box_pose_topic")
     robot_root_pose_topic = LaunchConfiguration("robot_root_pose_topic")
     monitor_topic = LaunchConfiguration("monitor_topic")
+    box_size_xyz = LaunchConfiguration("box_size_xyz")
+    tracking_error_topic = LaunchConfiguration("tracking_error_topic")
     retarget_keyframe_service = LaunchConfiguration("retarget_keyframe_service")
     retargeted_keyframe_topic = LaunchConfiguration("retargeted_keyframe_topic")
     retargeted_info_topic = LaunchConfiguration("retargeted_info_topic")
@@ -24,8 +37,18 @@ def generate_launch_description() -> LaunchDescription:
     return LaunchDescription(
         [
             DeclareLaunchArgument("image_topic", default_value="/camera/image_raw"),
-            DeclareLaunchArgument("image_path", default_value="/home/sitongchen/pics/standupwithbox.png"),
             DeclareLaunchArgument("rate_hz", default_value="2.0"),
+            DeclareLaunchArgument("camera_backend", default_value="mujoco"),
+            DeclareLaunchArgument("real_image_topic", default_value="/real_camera/image_raw"),
+            DeclareLaunchArgument("camera_width", default_value="640"),
+            DeclareLaunchArgument("camera_height", default_value="480"),
+            DeclareLaunchArgument("camera_frame_id", default_value="vlm_camera"),
+            DeclareLaunchArgument("camera_robot_xml", default_value=""),
+            DeclareLaunchArgument("camera_name", default_value=""),
+            DeclareLaunchArgument("camera_lookat", default_value="0.7 0.0 0.55"),
+            DeclareLaunchArgument("camera_distance", default_value="2.4"),
+            DeclareLaunchArgument("camera_azimuth", default_value="-135.0"),
+            DeclareLaunchArgument("camera_elevation", default_value="-18.0"),
             DeclareLaunchArgument("service_name", default_value="/vlm/query"),
             DeclareLaunchArgument("start_client", default_value="true"),
             DeclareLaunchArgument("client_delay_sec", default_value="2.0"),
@@ -33,6 +56,8 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("actual_box_pose_topic", default_value="/actual_box_pose"),
             DeclareLaunchArgument("robot_root_pose_topic", default_value=""),
             DeclareLaunchArgument("monitor_topic", default_value="/g1_sim/monitor"),
+            DeclareLaunchArgument("tracking_error_topic", default_value="/tracking_errors"),
+            DeclareLaunchArgument("box_size_xyz", default_value="0.3 0.3 0.3"),
             DeclareLaunchArgument("retarget_keyframe_service", default_value="/retargeter/generate_keyframe"),
             DeclareLaunchArgument("retargeted_keyframe_topic", default_value="/retargeter/output_keyframe"),
             DeclareLaunchArgument("retargeted_info_topic", default_value="/retargeter/output_info"),
@@ -41,16 +66,30 @@ def generate_launch_description() -> LaunchDescription:
                 default_value="Pick up the box on the ground and place it on the table.",
             ),
             DeclareLaunchArgument("start_visualizer", default_value="true"),
+            DeclareLaunchArgument("start_camera", default_value="true"),
             Node(
                 package="lm",
-                executable="dummy_camera",
-                name="dummy_camera",
+                executable="scene_camera",
+                name="scene_camera",
                 output="screen",
+                condition=IfCondition(start_camera),
                 parameters=[
                     {
+                        "backend": camera_backend,
                         "topic": image_topic,
-                        "image_path": image_path,
                         "rate_hz": rate_hz,
+                        "real_image_topic": real_image_topic,
+                        "width": camera_width,
+                        "height": camera_height,
+                        "frame_id": camera_frame_id,
+                        "robot_xml": camera_robot_xml,
+                        "monitor_topic": monitor_topic,
+                        "object_pose_topic": actual_box_pose_topic,
+                        "camera_name": camera_name,
+                        "camera_lookat": camera_lookat,
+                        "camera_distance": camera_distance,
+                        "camera_azimuth": camera_azimuth,
+                        "camera_elevation": camera_elevation,
                     }
                 ],
             ),
@@ -74,6 +113,7 @@ def generate_launch_description() -> LaunchDescription:
                 parameters=[
                     {
                         "retarget_keyframe_service": retarget_keyframe_service,
+                        "box_size_xyz": box_size_xyz,
                     }
                 ],
             ),
@@ -104,6 +144,8 @@ def generate_launch_description() -> LaunchDescription:
                                 "actual_box_pose_topic": actual_box_pose_topic,
                                 "robot_root_pose_topic": robot_root_pose_topic,
                                 "monitor_topic": monitor_topic,
+                                "tracking_error_topic": tracking_error_topic,
+                                "box_size_xyz": box_size_xyz,
                                 "retarget_keyframe_service": retarget_keyframe_service,
                                 "retargeted_keyframe_topic": retargeted_keyframe_topic,
                                 "retargeted_info_topic": retargeted_info_topic,

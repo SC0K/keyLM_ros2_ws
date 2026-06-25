@@ -9,8 +9,10 @@ import mujoco  # type: ignore[import-not-found]
 import numpy as np
 import rclpy
 from geometry_msgs.msg import PoseStamped
+from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.node import Node
 
+from lm.box_config import DEFAULT_BOX_SIZE_XYZ, parse_box_size_xyz
 from lm_interfaces.srv import RetargetKeyframe
 
 from lm.keyframe_box_retarget import (
@@ -166,7 +168,11 @@ class KeyframeRetargeterNode(Node):
 
         self.declare_parameter("retarget_keyframe_service", "/retargeter/generate_keyframe")
         self.declare_parameter("library_dir", "")
-        self.declare_parameter("box_size_xyz", [0.33, 0.33, 0.33])
+        self.declare_parameter(
+            "box_size_xyz",
+            list(DEFAULT_BOX_SIZE_XYZ),
+            descriptor=ParameterDescriptor(dynamic_typing=True),
+        )
         self.declare_parameter("box_hold_forward_axis", "x")
         self.declare_parameter("stand_before_pick_offset_m", 0.2)
         self.declare_parameter("stand_before_place_height_m", 1.0)
@@ -174,7 +180,7 @@ class KeyframeRetargeterNode(Node):
         self.declare_parameter("robot_xml", "")
 
         retarget_keyframe_service = str(self.get_parameter("retarget_keyframe_service").value)
-        self._box_size_xyz = np.asarray(self.get_parameter("box_size_xyz").value, dtype=np.float64)
+        self._box_size_xyz = parse_box_size_xyz(self.get_parameter("box_size_xyz").value)
         self._box_hold_forward_axis = _normalize_axis_label(
             str(self.get_parameter("box_hold_forward_axis").value)
         )

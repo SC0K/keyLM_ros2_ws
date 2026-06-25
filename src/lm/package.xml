@@ -16,6 +16,7 @@
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
   <depend>geometry_msgs</depend>
+  <depend>rcl_interfaces</depend>
   <depend>crl_humanoid_msgs</depend>
   <depend>cv_bridge</depend>
   <depend>lm_interfaces</depend>
