@@ -237,10 +237,16 @@ class PlannerAppNode(Node):
                 ],
                 dtype=np.float64,
             )
+        has_valid_object = object_quat is not None and float(np.linalg.norm(object_quat)) > 1e-9
         with self._lock:
-            self.keyframe_points = points[:-1] if len(points) > 1 else points
-            self.keyframe_object = points[-1] if points else None
-            self.keyframe_object_quat = object_quat
+            if has_valid_object:
+                self.keyframe_points = points[:-1] if len(points) > 1 else points
+                self.keyframe_object = points[-1] if points else None
+                self.keyframe_object_quat = object_quat
+            else:
+                self.keyframe_points = points[:-1] if len(points) > 1 else points
+                self.keyframe_object = None
+                self.keyframe_object_quat = None
 
     def _on_tracking_errors(self, msg: String) -> None:
         data = _json_or_text(msg.data)
