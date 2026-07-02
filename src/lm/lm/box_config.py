@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 
-DEFAULT_BOX_SIZE_XYZ = (0.3, 0.3, 0.3)
+DEFAULT_BOX_SIZE_XYZ = (0.33, 0.25, 0.285)
 
 
 def parse_box_size_xyz(value) -> np.ndarray:

@@ -141,7 +141,6 @@ class VLMClientNode(Node):
         self.declare_parameter("planner_status_topic", "/vlm_planner/status")
         self.declare_parameter("planner_decision_topic", "/vlm_planner/decision")
         self.declare_parameter("retarget_timeout_sec", 10.0)
-        self.declare_parameter("current_box_center", [0.7, 0.5, 0.15])
         self.declare_parameter("current_box_quat_wxyz", [1.0, 0.0, 0.0, 0.0])
         self.declare_parameter("actual_box_pose_timeout_sec", 2.0)
         self.declare_parameter("monitor_timeout_sec", 2.0)
@@ -150,30 +149,30 @@ class VLMClientNode(Node):
             list(DEFAULT_BOX_SIZE_XYZ),
             descriptor=ParameterDescriptor(dynamic_typing=True),
         )
-        self.declare_parameter("default_place_distance_m", 1.6)
+        self.declare_parameter("default_place_distance_m", 1.0)
         self.declare_parameter("stand_before_pick_offset_m", 0.2)
         self.declare_parameter("stand_after_pick_height_m", 1.0)
         self.declare_parameter("stand_before_place_height_m", 1.0)
         self.declare_parameter("min_stand_root_height_m", 0.78)
-        self.declare_parameter("default_target_root_center", [2.3, 0.5, 0.78])  # TODO: find the correct target root pose for root mode (navifation)
-        self.declare_parameter("default_target_root_quat_wxyz", [ 0.707, 0.0, 0.0,  0.707])
-        self.declare_parameter("default_target_box_quat_wxyz", [0.707, 0.0, 0.0,  0.707])
+        self.declare_parameter("default_target_root_center", [0.0, 0.0, 0.78])  # TODO: find the correct target root pose for root mode (navifation)
+        self.declare_parameter("default_target_root_quat_wxyz", [ 1.0, 0.0, 0.0,  0.0])
+        self.declare_parameter("default_target_box_quat_wxyz", [1.0, 0.0, 0.0,  0.0])
         self.declare_parameter("default_box_forward_axis", "x")     # TODO: compute the forward axis at pickup.
         self.declare_parameter("stationary_hold_sec", 1.0)
         self.declare_parameter("min_action_duration_sec", 1.0)
-        self.declare_parameter("robot_linear_stationary_threshold_mps", 0.04)
+        self.declare_parameter("robot_linear_stationary_threshold_mps", 0.05)
         self.declare_parameter("robot_angular_stationary_threshold_radps", 0.12)
-        self.declare_parameter("object_linear_stationary_threshold_mps", 0.03)
+        self.declare_parameter("object_linear_stationary_threshold_mps", 0.05)
         self.declare_parameter("object_angular_stationary_threshold_radps", 0.20)
-        self.declare_parameter("mean_body_success_threshold_m", 0.18)
-        self.declare_parameter("root_position_success_threshold_m", 0.15)
-        self.declare_parameter("root_orientation_success_threshold_rad", 0.10)
-        self.declare_parameter("object_position_success_threshold_m", 0.08)
-        self.declare_parameter("object_orientation_success_threshold_rad", 0.60)
-        self.declare_parameter("task_object_position_threshold_m", 0.08)
-        self.declare_parameter("task_object_orientation_threshold_rad", 0.60)
+        self.declare_parameter("mean_body_success_threshold_m", 0.20)
+        self.declare_parameter("root_position_success_threshold_m", 0.25)
+        self.declare_parameter("root_orientation_success_threshold_rad", 0.4)
+        self.declare_parameter("object_position_success_threshold_m", 0.25)
+        self.declare_parameter("object_orientation_success_threshold_rad", 1.00)
+        self.declare_parameter("task_object_position_threshold_m", 0.25)
+        self.declare_parameter("task_object_orientation_threshold_rad", 5.00)
 
-        self._current_box_center = np.asarray(self.get_parameter("current_box_center").value, dtype=np.float64)
+        self._current_box_center = np.zeros(3, dtype=np.float64)
         self._current_box_quat_wxyz = _normalize_quat_wxyz(
             np.asarray(self.get_parameter("current_box_quat_wxyz").value, dtype=np.float64)
         )
@@ -296,12 +295,13 @@ class VLMClientNode(Node):
         self._planner_status_pub.publish(msg)
 
     def publish_decision(self, step_index: int, response: VLMQuery.Response, published: bool) -> None:
+        object_to_manipulate = self._effective_object_to_manipulate(response)
         payload = {
             "stamp_monotonic": time.monotonic(),
             "step_index": int(step_index),
             "next_keyframe": response.next_keyframe,
-            "object_in_manipulation": bool(response.object_in_manipulation),
-            "object_to_manipulate": bool(self._last_object_to_manipulate),
+            "object_in_manipulation": object_to_manipulate,
+            "object_to_manipulate": object_to_manipulate,
             "task_completion": bool(response.task_completion),
             "measured_task_completion": self.measured_task_completion(),
             "published": bool(published),
@@ -311,6 +311,10 @@ class VLMClientNode(Node):
         msg = String()
         msg.data = json.dumps(payload, separators=(",", ":"))
         self._planner_decision_pub.publish(msg)
+
+    @staticmethod
+    def _effective_object_to_manipulate(response: VLMQuery.Response) -> bool:
+        return bool(response.object_in_manipulation) or response.next_keyframe in _OBJECT_REQUIRED_KEYFRAMES
 
     def send_request(
         self,
@@ -486,7 +490,7 @@ class VLMClientNode(Node):
 
         if not self._has_actual_box_pose:
             self.get_logger().warn(
-                "No actual box pose received before timeout; using configured current_box_center/current_box_quat_wxyz fallback."
+                "No actual box pose received before timeout; waiting for actual box pose before planning."
             )
             return False
         return True
@@ -511,21 +515,25 @@ class VLMClientNode(Node):
             return False
         return True
 
-    def _update_box_forward_axis_from_robot_once(self) -> None:
-        if self._box_forward_axis_initialized_from_robot:
-            return
-
+    def _update_box_forward_axis_from_robot(self) -> None:
+        previous_axis = self.box_forward_axis
         robot_forward_world = _quat_wxyz_to_rotmat(self._current_robot_quat_wxyz)[:, 0]
         robot_forward_world[2] = 0.0
         self.box_forward_axis = _infer_axis_label_from_world_dir(
             self._current_box_quat_wxyz,
             robot_forward_world,
         )
+        if not self._box_forward_axis_initialized_from_robot:
+            self.get_logger().info(
+                "Initialized box_forward_axis from robot orientation: %s"
+                % self.box_forward_axis
+            )
+        elif self.box_forward_axis != previous_axis:
+            self.get_logger().info(
+                "Updated box_forward_axis from robot/object orientation: %s"
+                % self.box_forward_axis
+            )
         self._box_forward_axis_initialized_from_robot = True
-        self.get_logger().info(
-            "Initialized box_forward_axis from robot orientation: %s"
-            % self.box_forward_axis
-        )
 
     def _stationary_flags(self) -> tuple[bool, bool, bool]:
         robot_stationary = (
@@ -582,8 +590,7 @@ class VLMClientNode(Node):
             return True
         if (time.monotonic() - self._last_action_sent_time) < self._min_action_duration_sec:
             return False
-        _, _, _, tracking_ready, _ = self._tracking_error_flags()
-        return tracking_ready
+        return True
 
     def _object_error_to_last_target(self) -> tuple[float | None, float | None]:
         if (
@@ -632,6 +639,74 @@ class VLMClientNode(Node):
             return None
         return _optional_float(self._tracking_errors.get(name))
 
+    def _default_task_target_box_center(self) -> np.ndarray:
+        front_dir = _box_axis_world(self._current_box_quat_wxyz, self.box_forward_axis)
+        front_dir[2] = 0.0
+        front_dir = _normalize_vec(front_dir, np.array([1.0, 0.0, 0.0], dtype=np.float64))
+        target = self._current_box_center + self._default_place_distance_m * front_dir
+        target[2] = self._box_size_xyz[2] / 2.0
+        return target
+
+    def initialize_task_target_once(self) -> bool:
+        if self._task_target_box_center is not None:
+            return True
+        if not self._has_actual_box_pose:
+            return False
+
+        self._update_box_forward_axis_from_robot()
+        self._task_target_box_center = self._default_task_target_box_center()
+        self._task_target_box_quat_wxyz = self._default_target_box_quat_wxyz.copy()
+        self.get_logger().info(
+            "Initialized fixed task target box position: %s"
+            % np.array2string(self._task_target_box_center, precision=3)
+        )
+        self.publish_status(
+            "task_target_initialized",
+            "Initialized fixed task target box position",
+            target_box_position_xyz=self._task_target_box_center.tolist(),
+            box_forward_axis=self.box_forward_axis,
+        )
+        return True
+
+    def _context_target_box_center(self) -> np.ndarray | None:
+        if self._task_target_box_center is not None:
+            return self._task_target_box_center.copy()
+        if self._has_actual_box_pose:
+            return self._default_task_target_box_center()
+        return None
+
+    def _distance_context(self) -> dict:
+        have_robot = self._has_robot_root_pose or self._has_monitor
+        robot_to_object = None
+        robot_to_object_xy = None
+        if have_robot and self._has_actual_box_pose:
+            robot_to_object_vec = self._current_box_center - self._current_robot_center
+            robot_to_object = float(np.linalg.norm(robot_to_object_vec))
+            robot_to_object_xy = float(np.linalg.norm(robot_to_object_vec[:2]))
+
+        target_box_center = self._context_target_box_center()
+        if self._task_target_box_center is not None:
+            target_box_source = "active_task_target"
+        elif target_box_center is not None:
+            target_box_source = "default_preview"
+        else:
+            target_box_source = "unavailable"
+        object_to_target = None
+        object_to_target_xy = None
+        if target_box_center is not None and self._has_actual_box_pose:
+            object_to_target_vec = target_box_center - self._current_box_center
+            object_to_target = float(np.linalg.norm(object_to_target_vec))
+            object_to_target_xy = float(np.linalg.norm(object_to_target_vec[:2]))
+
+        return {
+            "robot_to_object_distance_m": robot_to_object,
+            "robot_to_object_xy_distance_m": robot_to_object_xy,
+            "object_to_target_distance_m": object_to_target,
+            "object_to_target_xy_distance_m": object_to_target_xy,
+            "target_box_position_xyz": None if target_box_center is None else target_box_center.tolist(),
+            "target_box_source": target_box_source,
+        }
+
     def evaluate_last_action_success(self) -> bool | None:
         if self._last_action_name is None:
             return None
@@ -639,26 +714,22 @@ class VLMClientNode(Node):
         mean_body_error = self._tracking_metric("mean_body_position_error_m")
         root_position_error = self._tracking_metric("root_position_error_m")
         root_orientation_error = self._tracking_metric("root_orientation_error_rad")
-        object_position_error, object_orientation_error = self._object_error_to_last_target()
+        object_position_error, _object_orientation_error = self._object_error_to_last_target()
 
         checks = [
             mean_body_error is not None and mean_body_error <= self._mean_body_success_threshold_m,
             root_position_error is not None and root_position_error <= self._root_position_success_threshold_m,
             root_orientation_error is not None and root_orientation_error <= self._root_orientation_success_threshold_rad,
             object_position_error is not None and object_position_error <= self._object_position_success_threshold_m,
-            object_orientation_error is not None and object_orientation_error <= self._object_orientation_success_threshold_rad,
         ]
         self._last_action_success = bool(all(checks))
         return self._last_action_success
 
     def measured_task_completion(self) -> bool:
-        object_position_error, object_orientation_error = self._object_error_to_task_target()
-        if object_position_error is None or object_orientation_error is None:
+        object_position_error, _object_orientation_error = self._object_error_to_task_target()
+        if object_position_error is None:
             return False
-        return (
-            object_position_error <= self._task_object_position_threshold_m
-            and object_orientation_error <= self._task_object_orientation_threshold_rad
-        )
+        return object_position_error <= self._task_object_position_threshold_m
 
     def build_planner_context(self) -> str:
         robot_stationary, object_stationary, raw_stationary = self._stationary_flags()
@@ -728,40 +799,56 @@ class VLMClientNode(Node):
                 "task_object_orientation_error_rad": task_object_orientation_error,
             },
             "tracking_errors": self._tracking_errors or {},
+            "distance_context": self._distance_context(),
             "success_thresholds": {
                 "mean_body_position_error_m": self._mean_body_success_threshold_m,
                 "root_position_error_m": self._root_position_success_threshold_m,
                 "root_orientation_error_rad": self._root_orientation_success_threshold_rad,
                 "object_position_error_m": self._object_position_success_threshold_m,
-                "object_orientation_error_rad": self._object_orientation_success_threshold_rad,
+                "object_orientation_error_rad": None,
+                "object_orientation_ignored": True,
             },
             "task_completion_thresholds": {
                 "object_position_error_m": self._task_object_position_threshold_m,
-                "object_orientation_error_rad": self._task_object_orientation_threshold_rad,
+                "object_orientation_error_rad": None,
+                "object_orientation_ignored": True,
             },
             "request_policy": (
                 "This request is made only when robot_and_object_stationary has held long enough. "
                 "For the first request previous_action is none. For later requests previous_action is the keyframe selected by the previous VLM response. "
+                "If previous_action_finished is true and previous_action_success is false, the previous keyframe stopped with tracking or object error above threshold. "
+                "Object success and task completion use box position only; object orientation errors are diagnostic and ignored. "
+                "Use the image to check whether the robot is actually holding the box with two hands during object-aware carry/place phases, or whether the box has slipped, dropped, or is not controlled. "
+                "On failure, do not advance to the next semantic phase; retry the previous keyframe when safe, or choose a safe standing/setup keyframe before retrying. "
+                "For failed pick actions such as crouch_to_pick or stand_after_pick, recover with stand_before_pick first, then retry crouch_to_pick. "
+                "For failed place actions such as stand_before_place or crouch_to_place, retry the failed place keyframe if still safe, or recover with stand_before_place before retrying crouch_to_place. "
+                "For failed final standby, retry stand_after_place. "
                 "Set task_completion true only when measured_task_completion is true and the selected next keyframe leaves the robot in the final required task state. "
-                "The VLM response field object_in_manipulation is forwarded as object_to_manipulate. Set it true for object-aware pick/place frames such as crouch_to_pick, stand_after_pick, stand_before_place, and crouch_to_place. "
-                "It can be false for pure standing/root/standby frames such as stand_before_pick and final stand_after_place."
+                "The VLM response field object_in_manipulation is the same effective flag as object_to_manipulate: true means both retargeting and policy should consider the object. "
+                "Set it true for object-aware pick/place frames such as crouch_to_pick, stand_after_pick, stand_before_place, and crouch_to_place. It can be false for pure standing/root/standby frames such as stand_before_pick and final stand_after_place."
             ),
         }
         return json.dumps(context, indent=2)
 
     def publish_planner_outputs(self, response: VLMQuery.Response) -> bool:
+        if not self._has_actual_box_pose:
+            self.get_logger().error("Cannot publish planner outputs without an actual box pose.")
+            self.publish_status("missing_actual_box_pose", "Cannot publish planner outputs without an actual box pose")
+            return False
+
         pose_stamp = self._current_box_pose_stamp if self._current_box_pose_stamp is not None else response.image_stamp
         pose_frame_id = self._current_box_frame_id or "world"
-        # The service field is named object_in_manipulation for compatibility,
-        # but the value is forwarded as the retargeter/controller object mask.
-        object_to_manipulate = bool(response.object_in_manipulation) or response.next_keyframe in _OBJECT_REQUIRED_KEYFRAMES
+        # The service field name is kept for compatibility; this is the single
+        # object-aware retargeting and policy mask.
+        object_to_manipulate = self._effective_object_to_manipulate(response)
         if object_to_manipulate and not bool(response.object_in_manipulation):
             self.get_logger().info(
                 "Forcing object_to_manipulate=true for %s because this keyframe requires object-aware retargeting."
                 % response.next_keyframe
             )
+            response.object_in_manipulation = True
         if object_to_manipulate:
-            self._update_box_forward_axis_from_robot_once()
+            self._update_box_forward_axis_from_robot()
 
         current_box_pose_msg = self._pose_stamped_from(
             center=self._current_box_center,
@@ -770,12 +857,20 @@ class VLMClientNode(Node):
             frame_id=pose_frame_id,
         )
 
-        front_dir = _box_axis_world(self._current_box_quat_wxyz, self.box_forward_axis)
-        front_dir[2] = 0.0
-        front_dir = _normalize_vec(front_dir, np.array([1.0, 0.0, 0.0], dtype=np.float64))
-        target_box_center = self._current_box_center + self._default_place_distance_m * front_dir
-        target_box_center[2] = self._box_size_xyz[2] / 2.0 # TODO: compute actural target box pose.
-        target_box_quat = self._default_target_box_quat_wxyz.copy()
+        if not self.initialize_task_target_once():
+            self.get_logger().error("Cannot publish planner outputs without a fixed task target box position.")
+            self.publish_status(
+                "missing_task_target",
+                "Cannot publish planner outputs without a fixed task target box position",
+            )
+            return False
+
+        target_box_center = self._task_target_box_center.copy()
+        target_box_quat = (
+            self._task_target_box_quat_wxyz.copy()
+            if self._task_target_box_quat_wxyz is not None
+            else self._default_target_box_quat_wxyz.copy()
+        )
         try:
             raw = json.loads(response.raw_json) if response.raw_json else {}
             if isinstance(raw, dict):
@@ -819,6 +914,14 @@ class VLMClientNode(Node):
             root_z = max(root_z_candidates)
             target_root_center = np.array([root_xy[0], root_xy[1], root_z], dtype=np.float64)
             target_root_quat = _yaw_to_quat_wxyz(float(math.atan2(facing_dir[1], facing_dir[0])))
+        elif response.next_keyframe == "stand_after_place":
+            if self._has_robot_root_pose or self._has_monitor:
+                target_root_center = self._current_robot_center.copy()
+                target_root_quat = self._current_robot_quat_wxyz.copy()
+            else:
+                self.get_logger().warn(
+                    "No current robot root pose available for stand_after_place; using default target root pose."
+                )
 
         action_object_target_center, action_object_target_quat = self._expected_object_target_for_action(
             response.next_keyframe,
@@ -867,16 +970,14 @@ class VLMClientNode(Node):
         self._last_target_box_quat_wxyz = action_object_target_quat.copy()
         self._last_target_root_center = target_root_center.copy()
         self._last_target_root_quat_wxyz = target_root_quat.copy()
-        self._task_target_box_center = target_box_center.copy()
         self._task_target_box_quat_wxyz = target_box_quat.copy()
         self._last_object_to_manipulate = object_to_manipulate
         self._stationary_since = None
 
         self.get_logger().info(
-            "Published VLM-generated retargeted keyframe: %s, current_box_source=%s, target_box_quat=%s, box_forward_axis=%s"
+            "Published VLM-generated retargeted keyframe: %s, current_box_source=actual_box_pose, target_box_quat=%s, box_forward_axis=%s"
             % (
                 response.next_keyframe,
-                "actual_box_pose" if self._has_actual_box_pose else "configured_fallback",
                 target_box_quat.tolist(),
                 self.box_forward_axis,
             )
@@ -915,6 +1016,7 @@ def main(args: list[str] | None = None) -> None:
         task = parsed.task.strip() if parsed.task else "Pick up the box on the ground and place it on the table."
         node.wait_for_actual_box_pose(float(node.get_parameter("actual_box_pose_timeout_sec").value))
         node.wait_for_robot_pose(float(node.get_parameter("monitor_timeout_sec").value))
+        node.initialize_task_target_once()
 
         step_index = 0
         last_waiting_status_time = 0.0
@@ -929,7 +1031,7 @@ def main(args: list[str] | None = None) -> None:
                     )
                     node.publish_status(
                         "waiting_ready_for_request",
-                        "Waiting for robot/object stationary and tracking errors below threshold",
+                        "Waiting for robot/object stationary hold and minimum action duration",
                         previous_action=node._last_action_name or "none",
                         robot_stationary=robot_stationary,
                         object_stationary=object_stationary,
@@ -981,11 +1083,12 @@ def main(args: list[str] | None = None) -> None:
             node.publish_decision(step_index, response, published)
             rclpy.spin_once(node, timeout_sec=0.05)
 
+            object_to_manipulate = node._effective_object_to_manipulate(response)
             output = {
                 "step_index": step_index,
                 "next_keyframe": response.next_keyframe,
-                "object_in_manipulation": response.object_in_manipulation,
-                "object_to_manipulate": node._last_object_to_manipulate,
+                "object_in_manipulation": object_to_manipulate,
+                "object_to_manipulate": object_to_manipulate,
                 "task_completion": response.task_completion,
                 "measured_task_completion": node.measured_task_completion(),
                 "published": published,
