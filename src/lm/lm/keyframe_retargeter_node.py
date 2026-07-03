@@ -9,8 +9,10 @@ import mujoco  # type: ignore[import-not-found]
 import numpy as np
 import rclpy
 from geometry_msgs.msg import PoseStamped
+from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.node import Node
 
+from lm.box_config import DEFAULT_BOX_SIZE_XYZ, parse_box_size_xyz
 from lm_interfaces.srv import RetargetKeyframe
 
 from lm.keyframe_box_retarget import (
@@ -32,6 +34,8 @@ _AXIS_TO_LOCAL_VEC = {
     "z": np.array([0.0, 0.0, 1.0], dtype=np.float64),
     "-z": np.array([0.0, 0.0, -1.0], dtype=np.float64),
 }
+
+_OBJECT_REQUIRED_KEYFRAMES = frozenset({"stand_before_place"})
 
 def _quat_wxyz_multiply(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
     w1, x1, y1, z1 = q1
@@ -166,20 +170,30 @@ class KeyframeRetargeterNode(Node):
 
         self.declare_parameter("retarget_keyframe_service", "/retargeter/generate_keyframe")
         self.declare_parameter("library_dir", "")
-        self.declare_parameter("box_size_xyz", [0.33, 0.33, 0.33])
+        self.declare_parameter(
+            "box_size_xyz",
+            list(DEFAULT_BOX_SIZE_XYZ),
+            descriptor=ParameterDescriptor(dynamic_typing=True),
+        )
         self.declare_parameter("box_hold_forward_axis", "x")
         self.declare_parameter("stand_before_pick_offset_m", 0.2)
-        self.declare_parameter("stand_before_place_height_m", 1.0)
+        self.declare_parameter("stand_after_pick_height_m", 0.9)
+        self.declare_parameter("stand_before_place_height_m", 0.9)
+        self.declare_parameter("foot_motion_penalty_weight", 0.1)
+        self.declare_parameter("ee_root_penalty_weight", 2.0)
         self.declare_parameter("robot", "g1")
         self.declare_parameter("robot_xml", "")
 
         retarget_keyframe_service = str(self.get_parameter("retarget_keyframe_service").value)
-        self._box_size_xyz = np.asarray(self.get_parameter("box_size_xyz").value, dtype=np.float64)
+        self._box_size_xyz = parse_box_size_xyz(self.get_parameter("box_size_xyz").value)
         self._box_hold_forward_axis = _normalize_axis_label(
             str(self.get_parameter("box_hold_forward_axis").value)
         )
         self._stand_before_pick_offset_m = float(self.get_parameter("stand_before_pick_offset_m").value)
+        self._stand_after_pick_height_m = float(self.get_parameter("stand_after_pick_height_m").value)
         self._stand_before_place_height_m = float(self.get_parameter("stand_before_place_height_m").value)
+        self._foot_motion_penalty_weight = float(self.get_parameter("foot_motion_penalty_weight").value)
+        self._ee_root_penalty_weight = float(self.get_parameter("ee_root_penalty_weight").value)
         robot_xml = str(self.get_parameter("robot_xml").value).strip()
         if robot_xml:
             self._ik_model = mujoco.MjModel.from_xml_path(robot_xml)
@@ -252,8 +266,13 @@ class KeyframeRetargeterNode(Node):
     def _process_keyframe(self, keyframe_name: str, object_to_manipulate: bool | None = None) -> tuple[bytes, str]:
         if object_to_manipulate is not None:
             self._object_to_manipulate = bool(object_to_manipulate)
+        if keyframe_name in _OBJECT_REQUIRED_KEYFRAMES:
+            self._object_to_manipulate = True
         payload = self._load_payload(keyframe_name)
-        if self._object_to_manipulate:
+        if keyframe_name == "stand_after_place":
+            self._object_to_manipulate = False
+            mode = self._retarget_stand_after_place(payload)
+        elif self._object_to_manipulate:
             mode = self._retarget_for_box_task(keyframe_name, payload)
         else:
             mode = self._retarget_root_only(payload)
@@ -473,12 +492,28 @@ class KeyframeRetargeterNode(Node):
             quat_wxyz=q0[3:7],
         )
 
-        foot_targets = None
-        foot_mask = None
+        relative_body_ids: list[int] = []
+        relative_offsets: list[np.ndarray] = []
+        relative_masks: list[np.ndarray] = []
+        relative_weights: list[float] = []
         if self._ik_foot_body_ids:
-            foot_targets = np.vstack([_get_body_pos(self._ik_data, bid) for bid in self._ik_foot_body_ids])
-            foot_mask = np.zeros((len(self._ik_foot_body_ids), 3), dtype=np.float64)
-            foot_mask[:, 2] = 1.0
+            self._ik_data.qpos[:] = q_init
+            mujoco.mj_forward(self._ik_model, self._ik_data)
+            foot_positions = np.vstack([_get_body_pos(self._ik_data, bid) for bid in self._ik_foot_body_ids])
+            relative_body_ids.extend(self._ik_foot_body_ids)
+            relative_offsets.append(foot_positions - q_init[0:3][None, :])
+            relative_masks.append(np.ones((len(self._ik_foot_body_ids), 3), dtype=np.float64))
+            relative_weights.extend([self._foot_motion_penalty_weight] * len(self._ik_foot_body_ids))
+
+        if self._ee_root_penalty_weight > 0.0:
+            relative_body_ids.extend(self._ik_ee_body_ids)
+            relative_offsets.append(targets - q_init[0:3][None, :])
+            relative_masks.append(np.ones((len(self._ik_ee_body_ids), 3), dtype=np.float64))
+            relative_weights.extend([self._ee_root_penalty_weight] * len(self._ik_ee_body_ids))
+
+        relative_body_offsets = np.vstack(relative_offsets) if relative_offsets else None
+        relative_body_mask = np.vstack(relative_masks) if relative_masks else None
+        relative_body_weight = np.asarray(relative_weights, dtype=np.float64) if relative_weights else 1.0
 
         q_new, _ = solve_multi_ee_ik(
             self._ik_model,
@@ -486,9 +521,10 @@ class KeyframeRetargeterNode(Node):
             q_init=q_init,
             body_ids=self._ik_ee_body_ids,
             target_positions=targets,
-            fixed_body_ids=self._ik_foot_body_ids,
-            fixed_body_targets=foot_targets,
-            fixed_body_mask=foot_mask,
+            relative_body_ids=relative_body_ids,
+            relative_body_offsets=relative_body_offsets,
+            relative_body_mask=relative_body_mask,
+            relative_body_weight=relative_body_weight,
         )
         self._write_ik_result_to_payload(payload, q_new)
 
@@ -535,10 +571,12 @@ class KeyframeRetargeterNode(Node):
             return "ik_to_current_box_pick"
 
         if keyframe_name == "stand_after_pick":
-            self._apply_box_ik(payload, self._current_box_center, self._current_box_quat_wxyz)
-            payload["object_position_xyz"] = self._current_box_center.astype(payload["object_position_xyz"].dtype)
+            lifted_box_center = self._current_box_center.copy()
+            lifted_box_center[2] = self._stand_after_pick_height_m
+            self._apply_box_ik(payload, lifted_box_center, self._current_box_quat_wxyz)
+            payload["object_position_xyz"] = lifted_box_center.astype(payload["object_position_xyz"].dtype)
             payload["object_quat_wxyz"] = self._current_box_quat_wxyz.astype(payload["object_quat_wxyz"].dtype)
-            return "ik_to_current_box_stand_after_pick"
+            return "ik_to_lifted_box_stand_after_pick"
 
         if keyframe_name == "stand_before_pick":
             self._apply_root_pose(payload, self._target_root_center, self._target_root_quat_wxyz)
@@ -566,12 +604,11 @@ class KeyframeRetargeterNode(Node):
             return "ik_to_box_on_ground_at_place_target"
 
         if keyframe_name == "stand_after_place":
-            return "stand_after_place_no_box_retarget"
+            return self._retarget_stand_after_place(payload)
 
         return "unsupported_keyframe_no_change"
 
-    def _retarget_root_only(self, payload: dict[str, np.ndarray]) -> str:
-        self._apply_root_pose(payload, self._target_root_center, self._target_root_quat_wxyz)
+    def _zero_object_targets(self, payload: dict[str, np.ndarray]) -> None:
         for key in (
             "object_pose",
             "object_position_xyz",
@@ -581,6 +618,15 @@ class KeyframeRetargeterNode(Node):
         ):
             if key in payload:
                 payload[key] = np.zeros_like(payload[key])
+
+    def _retarget_stand_after_place(self, payload: dict[str, np.ndarray]) -> str:
+        self._apply_root_pose(payload, self._target_root_center, self._target_root_quat_wxyz)
+        self._zero_object_targets(payload)
+        return "stand_after_place_current_root"
+
+    def _retarget_root_only(self, payload: dict[str, np.ndarray]) -> str:
+        self._apply_root_pose(payload, self._target_root_center, self._target_root_quat_wxyz)
+        self._zero_object_targets(payload)
         return "root_only_retarget"
 
 def main(args: list[str] | None = None) -> None:

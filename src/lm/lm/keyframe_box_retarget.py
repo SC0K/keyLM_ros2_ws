@@ -199,6 +199,10 @@ def solve_multi_ee_ik(
     fixed_body_targets: np.ndarray | None = None,
     fixed_body_mask: np.ndarray | None = None,
     fixed_body_weight: float = 6.0,
+    relative_body_ids: Sequence[int] | None = None,
+    relative_body_offsets: np.ndarray | None = None,
+    relative_body_mask: np.ndarray | None = None,
+    relative_body_weight: float | np.ndarray = 6.0,
     max_iters: int = 80,
     pos_tol: float = 1e-4,
     damping: float = 1e-3,
@@ -241,6 +245,35 @@ def solve_multi_ee_ik(
                 jacp = np.zeros((3, nv), dtype=np.float64)
                 mujoco.mj_jacBody(model, data, jacp, None, body_id)
                 jac_rows.append(fixed_body_weight * jacp[rows][:, active])
+
+        if relative_body_ids is not None and relative_body_offsets is not None and len(relative_body_ids) > 0:
+            if np.isscalar(relative_body_weight):
+                relative_weights = np.full(len(relative_body_ids), float(relative_body_weight), dtype=np.float64)
+            else:
+                relative_weights = np.asarray(relative_body_weight, dtype=np.float64).reshape(-1)
+                if relative_weights.shape[0] != len(relative_body_ids):
+                    raise ValueError(
+                        "relative_body_weight must be a scalar or match the number of relative_body_ids"
+                    )
+            root_pos = q[0:3].copy()
+            root_jac = np.zeros((3, nv), dtype=np.float64)
+            for axis in range(min(3, nv)):
+                root_jac[axis, axis] = 1.0
+
+            for i, body_id in enumerate(relative_body_ids):
+                weight = float(relative_weights[i])
+                cur = _get_body_pos(data, body_id)
+                cur_offset = cur - root_pos
+                err = relative_body_offsets[i] - cur_offset
+                mask = np.ones(3, dtype=np.float64) if relative_body_mask is None else relative_body_mask[i].astype(np.float64)
+                rows = np.where(mask > 0.5)[0]
+                if rows.size == 0:
+                    continue
+                pos_errs.append(weight * err[rows])
+                jacp = np.zeros((3, nv), dtype=np.float64)
+                mujoco.mj_jacBody(model, data, jacp, None, body_id)
+                jac_rel = jacp - root_jac
+                jac_rows.append(weight * jac_rel[rows][:, active])
 
         e = np.concatenate(pos_errs, axis=0)
         err_norm = float(np.linalg.norm(e))
