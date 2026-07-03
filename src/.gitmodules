@@ -1,0 +1,2 @@
+[submodule "crl-humanoid-ros"]
+	url = git@gitlab.inf.ethz.ch:crl/crl-humanoid-ros.git
