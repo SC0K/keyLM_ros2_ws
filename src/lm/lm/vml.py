@@ -28,6 +28,9 @@ _AXIS_TO_LOCAL_VEC = {
 }
 
 _OBJECT_REQUIRED_KEYFRAMES = frozenset({"stand_before_place"})
+_GLOBAL_X_WORLD = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+_GLOBAL_X_YAW_QUAT_WXYZ = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+_PICK_POSE_KEYFRAMES = frozenset({"stand_before_pick", "crouch_to_pick", "stand_after_pick"})
 
 def _quat_wxyz_to_rotmat(q: np.ndarray) -> np.ndarray:
     q = np.asarray(q, dtype=np.float64)
@@ -150,32 +153,35 @@ class VLMClientNode(Node):
             descriptor=ParameterDescriptor(dynamic_typing=True),
         )
         self.declare_parameter("default_place_distance_m", 1.0)
-        self.declare_parameter("stand_before_pick_offset_m", 0.2)
+        self.declare_parameter("stand_before_pick_offset_m", 0.45)
+        self.declare_parameter("pick_max_horizontal_distance_m", 0.5)
         self.declare_parameter("stand_after_pick_height_m", 1.0)
         self.declare_parameter("stand_before_place_height_m", 1.0)
         self.declare_parameter("min_stand_root_height_m", 0.78)
         self.declare_parameter("default_target_root_center", [0.0, 0.0, 0.78])  # TODO: find the correct target root pose for root mode (navifation)
         self.declare_parameter("default_target_root_quat_wxyz", [ 1.0, 0.0, 0.0,  0.0])
         self.declare_parameter("default_target_box_quat_wxyz", [1.0, 0.0, 0.0,  0.0])
-        self.declare_parameter("default_box_forward_axis", "x")     # TODO: compute the forward axis at pickup.
+        self.declare_parameter("default_box_forward_axis", "x")
         self.declare_parameter("stationary_hold_sec", 1.0)
         self.declare_parameter("min_action_duration_sec", 1.0)
-        self.declare_parameter("robot_linear_stationary_threshold_mps", 0.05)
-        self.declare_parameter("robot_angular_stationary_threshold_radps", 0.12)
-        self.declare_parameter("object_linear_stationary_threshold_mps", 0.05)
-        self.declare_parameter("object_angular_stationary_threshold_radps", 0.20)
-        self.declare_parameter("mean_body_success_threshold_m", 0.20)
-        self.declare_parameter("root_position_success_threshold_m", 0.25)
-        self.declare_parameter("root_orientation_success_threshold_rad", 0.4)
-        self.declare_parameter("object_position_success_threshold_m", 0.25)
+        self.declare_parameter("robot_linear_stationary_threshold_mps", 0.1)
+        self.declare_parameter("robot_angular_stationary_threshold_radps", 0.15)
+        self.declare_parameter("object_linear_stationary_threshold_mps", 0.15)
+        self.declare_parameter("object_angular_stationary_threshold_radps", 0.30)
+        self.declare_parameter("mean_body_success_threshold_m", 0.30)
+        self.declare_parameter("root_position_success_threshold_m", 0.3)
+        self.declare_parameter("root_orientation_success_threshold_rad", 0.8)
+        self.declare_parameter("object_position_success_threshold_m", 0.45)
         self.declare_parameter("object_orientation_success_threshold_rad", 1.00)
-        self.declare_parameter("task_object_position_threshold_m", 0.25)
+        self.declare_parameter("task_object_position_threshold_m", 0.45)
         self.declare_parameter("task_object_orientation_threshold_rad", 5.00)
 
         self._current_box_center = np.zeros(3, dtype=np.float64)
         self._current_box_quat_wxyz = _normalize_quat_wxyz(
             np.asarray(self.get_parameter("current_box_quat_wxyz").value, dtype=np.float64)
         )
+        self._starting_box_center: np.ndarray | None = None
+        self._starting_box_quat_wxyz: np.ndarray | None = None
         self._has_actual_box_pose = False
         self._current_box_pose_stamp = None
         self._current_box_frame_id = "world"
@@ -201,9 +207,13 @@ class VLMClientNode(Node):
         self._last_target_root_quat_wxyz: np.ndarray | None = None
         self._task_target_box_center: np.ndarray | None = None
         self._task_target_box_quat_wxyz: np.ndarray | None = None
+        self._task_target_initialized_time: float | None = None
         self._last_object_to_manipulate = True
         self._default_place_distance_m = float(self.get_parameter("default_place_distance_m").value)
         self._stand_before_pick_offset_m = float(self.get_parameter("stand_before_pick_offset_m").value)
+        self._pick_max_horizontal_distance_m = float(
+            self.get_parameter("pick_max_horizontal_distance_m").value
+        )
         self._stand_after_pick_height_m = float(self.get_parameter("stand_after_pick_height_m").value)
         self._stand_before_place_height_m = float(self.get_parameter("stand_before_place_height_m").value)
         self._min_stand_root_height_m = float(self.get_parameter("min_stand_root_height_m").value)
@@ -294,11 +304,10 @@ class VLMClientNode(Node):
         msg.data = json.dumps(payload, separators=(",", ":"))
         self._planner_status_pub.publish(msg)
 
-    def publish_decision(self, step_index: int, response: VLMQuery.Response, published: bool) -> None:
+    def publish_decision(self, response: VLMQuery.Response, published: bool) -> None:
         object_to_manipulate = self._effective_object_to_manipulate(response)
         payload = {
             "stamp_monotonic": time.monotonic(),
-            "step_index": int(step_index),
             "next_keyframe": response.next_keyframe,
             "object_in_manipulation": object_to_manipulate,
             "object_to_manipulate": object_to_manipulate,
@@ -400,6 +409,8 @@ class VLMClientNode(Node):
         self._current_box_pose_stamp = msg.header.stamp
         self._current_box_frame_id = msg.header.frame_id or "world"
         if not self._has_actual_box_pose:
+            self._starting_box_center = center.copy()
+            self._starting_box_quat_wxyz = quat_wxyz.copy()
             self.get_logger().info(
                 "Loaded actual box pose: center=%s quat=%s frame=%s"
                 % (
@@ -620,10 +631,13 @@ class VLMClientNode(Node):
         place_target_center: np.ndarray,
         place_target_quat: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray]:
+        start_center, start_quat = self._fixed_start_box_pose()
+        if action in ("stand_before_pick", "crouch_to_pick"):
+            return start_center, start_quat
         if action in ("stand_after_pick",):
-            target = self._current_box_center.copy()
+            target = start_center.copy()
             target[2] = self._stand_after_pick_height_m
-            return target, self._current_box_quat_wxyz.copy()
+            return target, start_quat
         if action in ("stand_before_place",):
             target = np.asarray(place_target_center, dtype=np.float64).copy()
             target[2] = self._stand_before_place_height_m
@@ -634,16 +648,31 @@ class VLMClientNode(Node):
             return target, np.asarray(place_target_quat, dtype=np.float64).copy()
         return self._current_box_center.copy(), self._current_box_quat_wxyz.copy()
 
+    def _fixed_start_box_pose(self) -> tuple[np.ndarray, np.ndarray]:
+        center = (
+            self._starting_box_center
+            if self._starting_box_center is not None
+            else self._current_box_center
+        )
+        quat = (
+            self._starting_box_quat_wxyz
+            if self._starting_box_quat_wxyz is not None
+            else self._current_box_quat_wxyz
+        )
+        return center.copy(), quat.copy()
+
     def _tracking_metric(self, name: str) -> float | None:
         if self._tracking_errors is None:
             return None
         return _optional_float(self._tracking_errors.get(name))
 
     def _default_task_target_box_center(self) -> np.ndarray:
-        front_dir = _box_axis_world(self._current_box_quat_wxyz, self.box_forward_axis)
-        front_dir[2] = 0.0
-        front_dir = _normalize_vec(front_dir, np.array([1.0, 0.0, 0.0], dtype=np.float64))
-        target = self._current_box_center + self._default_place_distance_m * front_dir
+        source_center = (
+            self._starting_box_center
+            if self._starting_box_center is not None
+            else self._current_box_center
+        )
+        target = source_center + self._default_place_distance_m * _GLOBAL_X_WORLD
         target[2] = self._box_size_xyz[2] / 2.0
         return target
 
@@ -655,15 +684,22 @@ class VLMClientNode(Node):
 
         self._update_box_forward_axis_from_robot()
         self._task_target_box_center = self._default_task_target_box_center()
-        self._task_target_box_quat_wxyz = self._default_target_box_quat_wxyz.copy()
+        self._task_target_box_quat_wxyz = _normalize_quat_wxyz(self._default_target_box_quat_wxyz.copy())
+        self._task_target_initialized_time = time.monotonic()
         self.get_logger().info(
-            "Initialized fixed task target box position: %s"
-            % np.array2string(self._task_target_box_center, precision=3)
+            "Initialized fixed task target box pose: position=%s quat=%s"
+            % (
+                np.array2string(self._task_target_box_center, precision=3),
+                np.array2string(self._task_target_box_quat_wxyz, precision=3),
+            )
         )
         self.publish_status(
             "task_target_initialized",
-            "Initialized fixed task target box position",
+            "Initialized fixed task target box pose",
             target_box_position_xyz=self._task_target_box_center.tolist(),
+            target_box_quat_wxyz=self._task_target_box_quat_wxyz.tolist(),
+            target_direction_world_xyz=_GLOBAL_X_WORLD.tolist(),
+            target_source="starting_box_pose_plus_global_x",
             box_forward_axis=self.box_forward_axis,
         )
         return True
@@ -683,6 +719,10 @@ class VLMClientNode(Node):
             robot_to_object_vec = self._current_box_center - self._current_robot_center
             robot_to_object = float(np.linalg.norm(robot_to_object_vec))
             robot_to_object_xy = float(np.linalg.norm(robot_to_object_vec[:2]))
+        pick_within_horizontal_reach = (
+            robot_to_object_xy is not None
+            and robot_to_object_xy <= self._pick_max_horizontal_distance_m
+        )
 
         target_box_center = self._context_target_box_center()
         if self._task_target_box_center is not None:
@@ -701,10 +741,16 @@ class VLMClientNode(Node):
         return {
             "robot_to_object_distance_m": robot_to_object,
             "robot_to_object_xy_distance_m": robot_to_object_xy,
+            "pick_max_horizontal_distance_m": self._pick_max_horizontal_distance_m,
+            "pick_within_horizontal_reach": bool(pick_within_horizontal_reach),
             "object_to_target_distance_m": object_to_target,
             "object_to_target_xy_distance_m": object_to_target_xy,
             "target_box_position_xyz": None if target_box_center is None else target_box_center.tolist(),
             "target_box_source": target_box_source,
+            "target_direction_world_xyz": _GLOBAL_X_WORLD.tolist(),
+            "starting_box_position_xyz": None
+            if self._starting_box_center is None
+            else self._starting_box_center.tolist(),
         }
 
     def evaluate_last_action_success(self) -> bool | None:
@@ -722,7 +768,13 @@ class VLMClientNode(Node):
             root_orientation_error is not None and root_orientation_error <= self._root_orientation_success_threshold_rad,
             object_position_error is not None and object_position_error <= self._object_position_success_threshold_m,
         ]
-        self._last_action_success = bool(all(checks))
+        generic_success = bool(all(checks))
+        distance_context = self._distance_context()
+        stand_before_pick_reach_success = bool(
+            self._last_action_name == "stand_before_pick"
+            and distance_context["pick_within_horizontal_reach"]
+        )
+        self._last_action_success = bool(generic_success or stand_before_pick_reach_success)
         return self._last_action_success
 
     def measured_task_completion(self) -> bool:
@@ -738,8 +790,6 @@ class VLMClientNode(Node):
         )
         finished = self.ready_for_next_request()
         success = self.evaluate_last_action_success() if finished else self._last_action_success
-        object_position_error, object_orientation_error = self._object_error_to_last_target()
-        task_object_position_error, task_object_orientation_error = self._object_error_to_task_target()
         context = {
             "previous_action": self._last_action_name or "none",
             "previous_action_finished": bool(finished),
@@ -767,37 +817,6 @@ class VLMClientNode(Node):
                 "root_position_threshold_m": self._root_position_success_threshold_m,
                 "root_orientation_threshold_rad": self._root_orientation_success_threshold_rad,
             },
-            "current_state": {
-                "robot_root_position_xyz": self._current_robot_center.tolist(),
-                "robot_root_quat_wxyz": self._current_robot_quat_wxyz.tolist(),
-                "box_position_xyz": self._current_box_center.tolist(),
-                "box_quat_wxyz": self._current_box_quat_wxyz.tolist(),
-                "box_forward_axis": self.box_forward_axis,
-            },
-            "previous_targets": {
-                "last_action_object_target_position_xyz": None
-                if self._last_target_box_center is None
-                else self._last_target_box_center.tolist(),
-                "last_action_object_target_quat_wxyz": None
-                if self._last_target_box_quat_wxyz is None
-                else self._last_target_box_quat_wxyz.tolist(),
-                "target_root_position_xyz": None
-                if self._last_target_root_center is None
-                else self._last_target_root_center.tolist(),
-                "target_root_quat_wxyz": None
-                if self._last_target_root_quat_wxyz is None
-                else self._last_target_root_quat_wxyz.tolist(),
-                "last_action_object_position_error_m": object_position_error,
-                "last_action_object_orientation_error_rad": object_orientation_error,
-                "task_target_box_position_xyz": None
-                if self._task_target_box_center is None
-                else self._task_target_box_center.tolist(),
-                "task_target_box_quat_wxyz": None
-                if self._task_target_box_quat_wxyz is None
-                else self._task_target_box_quat_wxyz.tolist(),
-                "task_object_position_error_m": task_object_position_error,
-                "task_object_orientation_error_rad": task_object_orientation_error,
-            },
             "tracking_errors": self._tracking_errors or {},
             "distance_context": self._distance_context(),
             "success_thresholds": {
@@ -807,6 +826,7 @@ class VLMClientNode(Node):
                 "object_position_error_m": self._object_position_success_threshold_m,
                 "object_orientation_error_rad": None,
                 "object_orientation_ignored": True,
+                "stand_before_pick_robot_to_box_xy_m": self._pick_max_horizontal_distance_m,
             },
             "task_completion_thresholds": {
                 "object_position_error_m": self._task_object_position_threshold_m,
@@ -818,7 +838,10 @@ class VLMClientNode(Node):
                 "For the first request previous_action is none. For later requests previous_action is the keyframe selected by the previous VLM response. "
                 "If previous_action_finished is true and previous_action_success is false, the previous keyframe stopped with tracking or object error above threshold. "
                 "Object success and task completion use box position only; object orientation errors are diagnostic and ignored. "
+                "The stand_before_pick action is also successful when the robot root is within 0.5 m horizontally of the current box. "
                 "Use the image to check whether the robot is actually holding the box with two hands during object-aware carry/place phases, or whether the box has slipped, dropped, or is not controlled. "
+                "Select crouch_to_pick only when distance_context.pick_within_horizontal_reach is true, meaning robot_to_object_xy_distance_m is at most 0.5 m. "
+                "If that distance is greater than 0.5 m or unavailable, select stand_before_pick so the robot approaches the box before attempting to pick it. "
                 "On failure, do not advance to the next semantic phase; retry the previous keyframe when safe, or choose a safe standing/setup keyframe before retrying. "
                 "For failed pick actions such as crouch_to_pick or stand_after_pick, recover with stand_before_pick first, then retry crouch_to_pick. "
                 "For failed place actions such as stand_before_place or crouch_to_place, retry the failed place keyframe if still safe, or recover with stand_before_place before retrying crouch_to_place. "
@@ -850,9 +873,19 @@ class VLMClientNode(Node):
         if object_to_manipulate:
             self._update_box_forward_axis_from_robot()
 
+        start_box_center, start_box_quat = self._fixed_start_box_pose()
+        retarget_current_box_source = (
+            "fixed_start_box_pose" if response.next_keyframe in _PICK_POSE_KEYFRAMES else "current_box_pose"
+        )
+        retarget_current_box_center = (
+            start_box_center if response.next_keyframe in _PICK_POSE_KEYFRAMES else self._current_box_center
+        )
+        retarget_current_box_quat = (
+            start_box_quat if response.next_keyframe in _PICK_POSE_KEYFRAMES else self._current_box_quat_wxyz
+        )
         current_box_pose_msg = self._pose_stamped_from(
-            center=self._current_box_center,
-            quat_wxyz=self._current_box_quat_wxyz,
+            center=retarget_current_box_center,
+            quat_wxyz=retarget_current_box_quat,
             stamp=pose_stamp,
             frame_id=pose_frame_id,
         )
@@ -871,16 +904,6 @@ class VLMClientNode(Node):
             if self._task_target_box_quat_wxyz is not None
             else self._default_target_box_quat_wxyz.copy()
         )
-        try:
-            raw = json.loads(response.raw_json) if response.raw_json else {}
-            if isinstance(raw, dict):
-                q = raw.get("target_box_quat_wxyz")
-                if isinstance(q, (list, tuple)) and len(q) == 4:
-                    q_arr = np.asarray(q, dtype=np.float64)
-                    if np.linalg.norm(q_arr) > 1e-9:
-                        target_box_quat = q_arr / np.linalg.norm(q_arr)
-        except Exception:
-            pass
         target_box_pose_msg = self._pose_stamped_from(
             center=target_box_center,
             quat_wxyz=target_box_quat,
@@ -892,15 +915,15 @@ class VLMClientNode(Node):
         target_root_quat = self._default_target_root_quat_wxyz.copy()
         if response.next_keyframe == "stand_before_pick":
             # Compute stand-before-pick root target in VLM client.
-            rot = _quat_wxyz_to_rotmat(self._current_box_quat_wxyz)
+            rot = _quat_wxyz_to_rotmat(start_box_quat)
             hx, hy = 0.5 * float(self._box_size_xyz[0]), 0.5 * float(self._box_size_xyz[1])
             edge_centers_local = np.array([[hx, 0, 0], [-hx, 0, 0], [0, hy, 0], [0, -hy, 0]], dtype=np.float64)
-            edge_centers_world = edge_centers_local @ rot.T + self._current_box_center[None, :]
+            edge_centers_world = edge_centers_local @ rot.T + start_box_center[None, :]
             robot_xy = self._current_robot_center[:2] if (self._has_robot_root_pose or self._has_monitor) else np.zeros(2)
             dists = np.linalg.norm(edge_centers_world[:, :2] - robot_xy[None, :], axis=1)
             nearest_idx = int(np.argmin(dists))
             edge_center = edge_centers_world[nearest_idx]
-            outward = edge_center[:2] - self._current_box_center[:2]
+            outward = edge_center[:2] - start_box_center[:2]
             n = np.linalg.norm(outward)
             if n < 1e-9:
                 outward = np.array([1.0, 0.0], dtype=np.float64)
@@ -917,7 +940,7 @@ class VLMClientNode(Node):
         elif response.next_keyframe == "stand_after_place":
             if self._has_robot_root_pose or self._has_monitor:
                 target_root_center = self._current_robot_center.copy()
-                target_root_quat = self._current_robot_quat_wxyz.copy()
+                target_root_quat = _GLOBAL_X_YAW_QUAT_WXYZ.copy()
             else:
                 self.get_logger().warn(
                     "No current robot root pose available for stand_after_place; using default target root pose."
@@ -970,14 +993,14 @@ class VLMClientNode(Node):
         self._last_target_box_quat_wxyz = action_object_target_quat.copy()
         self._last_target_root_center = target_root_center.copy()
         self._last_target_root_quat_wxyz = target_root_quat.copy()
-        self._task_target_box_quat_wxyz = target_box_quat.copy()
         self._last_object_to_manipulate = object_to_manipulate
         self._stationary_since = None
 
         self.get_logger().info(
-            "Published VLM-generated retargeted keyframe: %s, current_box_source=actual_box_pose, target_box_quat=%s, box_forward_axis=%s"
+            "Published VLM-generated retargeted keyframe: %s, current_box_source=%s, target_box_quat=%s, box_forward_axis=%s"
             % (
                 response.next_keyframe,
+                retarget_current_box_source,
                 target_box_quat.tolist(),
                 self.box_forward_axis,
             )
@@ -988,6 +1011,9 @@ class VLMClientNode(Node):
             keyframe=response.next_keyframe,
             object_in_manipulation=object_to_manipulate,
             object_to_manipulate=object_to_manipulate,
+            current_box_source=retarget_current_box_source,
+            current_box_position_xyz=retarget_current_box_center.tolist(),
+            target_box_position_xyz=target_box_center.tolist(),
         )
         return True
 
@@ -1013,12 +1039,21 @@ def main(args: list[str] | None = None) -> None:
     node = VLMClientNode(parsed.service)
     try:
         node.publish_status("connected", "VLM planner client started")
-        task = parsed.task.strip() if parsed.task else "Pick up the box on the ground and place it on the table."
-        node.wait_for_actual_box_pose(float(node.get_parameter("actual_box_pose_timeout_sec").value))
+        task = parsed.task.strip() if parsed.task else "Pick up the box on the ground and place it 1m at the front."
+        if not node.wait_for_actual_box_pose(float(node.get_parameter("actual_box_pose_timeout_sec").value)):
+            node.publish_status(
+                "missing_start_box_pose",
+                "Cannot start VLM planner until the starting box pose has been received.",
+            )
+            raise RuntimeError("Cannot initialize fixed task target without starting box pose")
         node.wait_for_robot_pose(float(node.get_parameter("monitor_timeout_sec").value))
-        node.initialize_task_target_once()
+        if not node.initialize_task_target_once():
+            node.publish_status(
+                "missing_task_target",
+                "Cannot start VLM planner until the fixed target box pose is initialized.",
+            )
+            raise RuntimeError("Cannot initialize fixed task target box pose")
 
-        step_index = 0
         last_waiting_status_time = 0.0
         while rclpy.ok():
             rclpy.spin_once(node, timeout_sec=max(0.0, parsed.poll_period))
@@ -1047,13 +1082,12 @@ def main(args: list[str] | None = None) -> None:
 
             context = node.build_planner_context()
             node.get_logger().info(
-                "Sending VLM request step=%d previous_action=%s"
-                % (step_index, node._last_action_name or "none")
+                "Sending VLM request previous_action=%s"
+                % (node._last_action_name or "none")
             )
             node.publish_status(
                 "sending_vlm_request",
                 "Sending request to VLM service",
-                step_index=step_index,
                 previous_action=node._last_action_name or "none",
             )
             response = node.send_request(
@@ -1063,16 +1097,15 @@ def main(args: list[str] | None = None) -> None:
             )
 
             if response is None:
-                node.publish_status("vlm_request_failed", "No response from VLM service", step_index=step_index)
+                node.publish_status("vlm_request_failed", "No response from VLM service")
                 raise RuntimeError("No response from service")
             if not response.success:
-                node.publish_status("vlm_request_failed", response.error_message, step_index=step_index)
+                node.publish_status("vlm_request_failed", response.error_message)
                 raise RuntimeError(response.error_message)
 
             node.publish_status(
                 "answer_received",
                 f"VLM answer received: {response.next_keyframe}",
-                step_index=step_index,
                 next_keyframe=response.next_keyframe,
                 latency_sec=float(response.latency_sec),
                 task_completion=bool(response.task_completion),
@@ -1080,12 +1113,11 @@ def main(args: list[str] | None = None) -> None:
             node.wait_for_actual_box_pose(float(node.get_parameter("actual_box_pose_timeout_sec").value))
             node.wait_for_robot_pose(float(node.get_parameter("monitor_timeout_sec").value))
             published = node.publish_planner_outputs(response)
-            node.publish_decision(step_index, response, published)
+            node.publish_decision(response, published)
             rclpy.spin_once(node, timeout_sec=0.05)
 
             object_to_manipulate = node._effective_object_to_manipulate(response)
             output = {
-                "step_index": step_index,
                 "next_keyframe": response.next_keyframe,
                 "object_in_manipulation": object_to_manipulate,
                 "object_to_manipulate": object_to_manipulate,
@@ -1101,7 +1133,6 @@ def main(args: list[str] | None = None) -> None:
             }
             print(json.dumps(output, indent=2), flush=True)
 
-            step_index += 1
             if response.task_completion:
                 node.get_logger().info("VLM marked task complete; stopping planner client loop.")
                 node.publish_status("task_complete", "VLM marked task complete")
