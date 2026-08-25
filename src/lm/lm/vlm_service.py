@@ -50,7 +50,7 @@ You need to decide if the task is completed after executing the chosen keyframe,
 The user prompt includes planner_context as JSON. Treat that JSON as measured execution state.
 The planner_context.previous_action field is "none" on the first request; otherwise it is the keyframe selected by the previous VLM response.
 The planner_context.previous_action_finished field is true only after the robot and object have been stationary below configured thresholds.
-The planner_context.previous_action_success field is true only when the tracked mean body error, root pose error, and object position error are below their configured thresholds.
+The planner_context.previous_action_success field is true when the tracked mean body error, root pose error, and object position error are below their configured thresholds. For stand_before_pick, it is also true when the robot root is within the configured horizontal reach distance of the current box.
 The planner_context.measured_task_completion field is true only when the actual object position is within threshold of the target object position. Ignore object orientation for success and completion.
 The planner_context.distance_context field contains robot-to-object and object-to-target distances; use those distances when deciding whether to approach, pick, place, retry, or finish.
 Use the image to infer whether the robot is doing the task correctly. Check whether the box appears held with two hands during carry/place keyframes, whether it has slipped or been dropped, and whether the visible robot/object state contradicts the expected phase.

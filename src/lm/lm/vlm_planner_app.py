@@ -394,7 +394,7 @@ class VLMPlannerApp:
         ttk.Label(right, text="Task Command", font=("TkDefaultFont", 13, "bold")).grid(row=0, column=0, sticky="w")
         self.task_text = tk.Text(right, width=42, height=6, wrap="word")
         self.task_text.grid(row=1, column=0, sticky="ew", pady=(8, 8))
-        self.task_text.insert("1.0", "Pick up the box on the ground and place it on the table.")
+        self.task_text.insert("1.0", "Pick up the box on the ground and place it 1m at the front.")
 
         buttons = ttk.Frame(right)
         buttons.grid(row=2, column=0, sticky="ew")

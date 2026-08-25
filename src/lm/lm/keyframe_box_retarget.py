@@ -214,9 +214,27 @@ def solve_multi_ee_ik(
     nv = model.nv
     active = np.arange(nv, dtype=np.int32)
 
-    # Freeze base z and base orientation updates to prevent lifting/tilting the whole robot.
+    # The caller has already placed the floating base at its retargeted root pose.
+    # Freeze all six base DoFs so IK cannot hide an unreachable hand target by
+    # sliding or rotating the whole robot away from that requested root pose.
     if nv >= 6:
-        active = active[~np.isin(active, np.array([2, 3, 4, 5], dtype=np.int32))]
+        active = active[6:]
+
+    def clamp_limited_joints() -> None:
+        for joint_id in range(model.njnt):
+            if not model.jnt_limited[joint_id]:
+                continue
+            joint_type = int(model.jnt_type[joint_id])
+            if joint_type not in (
+                int(mujoco.mjtJoint.mjJNT_HINGE),
+                int(mujoco.mjtJoint.mjJNT_SLIDE),
+            ):
+                continue
+            qpos_adr = int(model.jnt_qposadr[joint_id])
+            lower, upper = model.jnt_range[joint_id]
+            q[qpos_adr] = np.clip(q[qpos_adr], lower, upper)
+
+    clamp_limited_joints()
 
     for _ in range(max_iters):
         data.qpos[:] = q
@@ -281,14 +299,17 @@ def solve_multi_ee_ik(
             return q, err_norm
 
         J = np.vstack(jac_rows)
+        q_from_init = np.zeros(nv, dtype=np.float64)
+        mujoco.mj_differentiatePos(model, q_from_init, 1.0, q_init, q)
         A = J.T @ J + (damping + regularization) * np.eye(J.shape[1], dtype=np.float64)
-        b = J.T @ e
+        b = J.T @ e - regularization * q_from_init[active]
         dq_active = np.linalg.solve(A, b)
         dqvel = np.zeros(nv, dtype=np.float64)
         dqvel[active] = step_scale * dq_active
 
         mujoco.mj_integratePos(model, q, dqvel, 1.0)
         mujoco.mj_normalizeQuat(model, q)
+        clamp_limited_joints()
 
     data.qpos[:] = q
     mujoco.mj_forward(model, data)
@@ -344,6 +365,7 @@ def _body_names_from_model(model: mujoco.MjModel) -> list[str]:
 def _pick_existing_default_ee(model: mujoco.MjModel) -> list[str]:
     candidates = [
         ("left_hand_palm_link", "right_hand_palm_link"),
+        ("left_flat_hand", "right_flat_hand"),
         ("left_rubber_hand_link", "right_rubber_hand_link"),
         ("left_sphere_hand", "right_sphere_hand"),
         ("left_wrist_roll_link", "right_wrist_roll_link"),

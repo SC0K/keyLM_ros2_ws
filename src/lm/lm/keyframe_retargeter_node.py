@@ -22,7 +22,6 @@ from lm.keyframe_box_retarget import (
     _pick_existing_default_ee,
     _pick_existing_default_feet,
     infer_scaled_targets,
-    infer_scaled_targets_with_corner_surface_alignment,
     solve_multi_ee_ik,
 )
 
@@ -36,6 +35,8 @@ _AXIS_TO_LOCAL_VEC = {
 }
 
 _OBJECT_REQUIRED_KEYFRAMES = frozenset({"stand_before_place"})
+_PICK_POSE_KEYFRAMES = frozenset({"stand_before_pick", "crouch_to_pick", "stand_after_pick"})
+ISAAC_BOX_REFERENCE_OFFSET_RPY_DEG = np.array([-6.0, -9.0, 26.0], dtype=np.float64)
 
 def _quat_wxyz_multiply(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
     w1, x1, y1, z1 = q1
@@ -62,6 +63,33 @@ def _quat_wxyz_normalize(q: np.ndarray) -> np.ndarray:
     if n < 1e-12:
         return np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
     return q / n
+
+
+def _quat_wxyz_from_xyz_rpy_deg(rpy_deg: np.ndarray) -> np.ndarray:
+    """Convert XYZ roll-pitch-yaw degrees to a WXYZ quaternion."""
+    roll, pitch, yaw = np.deg2rad(np.asarray(rpy_deg, dtype=np.float64))
+    cr, sr = math.cos(0.5 * roll), math.sin(0.5 * roll)
+    cp, sp = math.cos(0.5 * pitch), math.sin(0.5 * pitch)
+    cy, sy = math.cos(0.5 * yaw), math.sin(0.5 * yaw)
+    return _quat_wxyz_normalize(
+        np.array(
+            [
+                cr * cp * cy + sr * sp * sy,
+                sr * cp * cy - cr * sp * sy,
+                cr * sp * cy + sr * cp * sy,
+                cr * cp * sy - sr * sp * cy,
+            ],
+            dtype=np.float64,
+        )
+    )
+
+
+def _remove_dataset_box_mesh_offset(quat_wxyz: np.ndarray, offset_rpy_deg: np.ndarray) -> np.ndarray:
+    """Convert a dataset largebox mesh-frame orientation to the axis-aligned box frame."""
+    mesh_offset = _quat_wxyz_from_xyz_rpy_deg(offset_rpy_deg)
+    return _quat_wxyz_normalize(
+        _quat_wxyz_multiply(_quat_wxyz_normalize(quat_wxyz), _quat_wxyz_conj(mesh_offset))
+    )
 
 
 def _quat_wxyz_to_rotmat(q: np.ndarray) -> np.ndarray:
@@ -181,6 +209,11 @@ class KeyframeRetargeterNode(Node):
         self.declare_parameter("stand_before_place_height_m", 0.9)
         self.declare_parameter("foot_motion_penalty_weight", 0.1)
         self.declare_parameter("ee_root_penalty_weight", 2.0)
+        self.declare_parameter("ik_max_residual_m", 0.05)
+        self.declare_parameter(
+            "dataset_box_reference_offset_rpy_deg",
+            ISAAC_BOX_REFERENCE_OFFSET_RPY_DEG.tolist(),
+        )
         self.declare_parameter("robot", "g1")
         self.declare_parameter("robot_xml", "")
 
@@ -194,6 +227,15 @@ class KeyframeRetargeterNode(Node):
         self._stand_before_place_height_m = float(self.get_parameter("stand_before_place_height_m").value)
         self._foot_motion_penalty_weight = float(self.get_parameter("foot_motion_penalty_weight").value)
         self._ee_root_penalty_weight = float(self.get_parameter("ee_root_penalty_weight").value)
+        self._ik_max_residual_m = float(self.get_parameter("ik_max_residual_m").value)
+        self._dataset_box_reference_offset_rpy_deg = np.asarray(
+            self.get_parameter("dataset_box_reference_offset_rpy_deg").value,
+            dtype=np.float64,
+        ).reshape(-1)
+        if self._dataset_box_reference_offset_rpy_deg.size != 3:
+            raise ValueError("dataset_box_reference_offset_rpy_deg must contain exactly 3 values")
+        if self._ik_max_residual_m <= 0.0:
+            raise ValueError("ik_max_residual_m must be positive")
         robot_xml = str(self.get_parameter("robot_xml").value).strip()
         if robot_xml:
             self._ik_model = mujoco.MjModel.from_xml_path(robot_xml)
@@ -223,6 +265,10 @@ class KeyframeRetargeterNode(Node):
         self._target_root_center = np.array([0.0, 0.0, 0.0], dtype=np.float64)
         self._target_root_quat_wxyz = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
         self._has_current_box_pose = False
+        self._fixed_start_box_center: np.ndarray | None = None
+        self._fixed_start_box_quat_wxyz: np.ndarray | None = None
+        self._fixed_target_box_center: np.ndarray | None = None
+        self._fixed_target_box_quat_wxyz: np.ndarray | None = None
         self._latest_retargeted_keyframe_data: list[int] | None = None
         self._latest_retargeted_info_data: str | None = None
         self._latest_retargeted_keyframe_name: str | None = None
@@ -288,6 +334,14 @@ class KeyframeRetargeterNode(Node):
                 "serialized_npz_bytes": len(payload_bytes),
                 "mode": mode,
                 "object_to_manipulate": bool(self._object_to_manipulate),
+                "current_box_position_xyz": self._current_box_center.tolist(),
+                "target_box_position_xyz": self._target_box_center.tolist(),
+                "fixed_start_box_position_xyz": None
+                if self._fixed_start_box_center is None
+                else self._fixed_start_box_center.tolist(),
+                "fixed_target_box_position_xyz": None
+                if self._fixed_target_box_center is None
+                else self._fixed_target_box_center.tolist(),
             }
         )
         self._latest_retargeted_info_data = info_data
@@ -310,9 +364,39 @@ class KeyframeRetargeterNode(Node):
 
         try:
             self._object_to_manipulate = bool(request.object_to_manipulate)
-            self._current_box_center, self._current_box_quat_wxyz = _pose_to_arrays(request.current_box_pose)
-            self._target_box_center, self._target_box_quat_wxyz = _pose_to_arrays(request.target_box_pose)
+            request_current_box_center, request_current_box_quat_wxyz = _pose_to_arrays(request.current_box_pose)
+            request_target_box_center, request_target_box_quat_wxyz = _pose_to_arrays(request.target_box_pose)
             self._target_root_center, self._target_root_quat_wxyz = _pose_to_arrays(request.target_root_pose)
+
+            if self._fixed_start_box_center is None or self._fixed_start_box_quat_wxyz is None:
+                self._fixed_start_box_center = request_current_box_center.copy()
+                self._fixed_start_box_quat_wxyz = request_current_box_quat_wxyz.copy()
+                self.get_logger().info(
+                    "Latched fixed start box pose: position=%s quat=%s"
+                    % (
+                        np.array2string(self._fixed_start_box_center, precision=3),
+                        np.array2string(self._fixed_start_box_quat_wxyz, precision=3),
+                    )
+                )
+            if self._fixed_target_box_center is None or self._fixed_target_box_quat_wxyz is None:
+                self._fixed_target_box_center = request_target_box_center.copy()
+                self._fixed_target_box_quat_wxyz = request_target_box_quat_wxyz.copy()
+                self.get_logger().info(
+                    "Latched fixed target box pose: position=%s quat=%s"
+                    % (
+                        np.array2string(self._fixed_target_box_center, precision=3),
+                        np.array2string(self._fixed_target_box_quat_wxyz, precision=3),
+                    )
+                )
+
+            if keyframe_name in _PICK_POSE_KEYFRAMES:
+                self._current_box_center = self._fixed_start_box_center.copy()
+                self._current_box_quat_wxyz = self._fixed_start_box_quat_wxyz.copy()
+            else:
+                self._current_box_center = request_current_box_center
+                self._current_box_quat_wxyz = request_current_box_quat_wxyz
+            self._target_box_center = self._fixed_target_box_center.copy()
+            self._target_box_quat_wxyz = self._fixed_target_box_quat_wxyz.copy()
             self._has_current_box_pose = True
             self._box_hold_forward_axis = _normalize_axis_label(request.box_forward_axis)
             payload_bytes, info_data = self._process_keyframe(keyframe_name, self._object_to_manipulate)
@@ -423,10 +507,18 @@ class KeyframeRetargeterNode(Node):
         ee_world = np.vstack([_get_body_pos(self._ik_data, bid) for bid in self._ik_ee_body_ids])
         if "object_position_xyz" in payload and "object_quat_wxyz" in payload:
             src_center = np.asarray(payload["object_position_xyz"], dtype=np.float64).copy()
-            src_quat = np.asarray(payload["object_quat_wxyz"], dtype=np.float64).copy()
-            self.get_logger().info(f"Retargeting with object. src_center={src_center}, src_quat={src_quat}, dest_center={dst_center}, dst_quat={dst_quat}")
-            if np.linalg.norm(src_quat) < 1e-12:
-                src_quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+            dataset_src_quat = np.asarray(payload["object_quat_wxyz"], dtype=np.float64).copy()
+            if np.linalg.norm(dataset_src_quat) < 1e-12:
+                dataset_src_quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+            src_quat = _remove_dataset_box_mesh_offset(
+                dataset_src_quat,
+                self._dataset_box_reference_offset_rpy_deg,
+            )
+            self.get_logger().info(
+                "Retargeting with object. "
+                f"src_center={src_center}, dataset_src_quat={dataset_src_quat}, "
+                f"axis_aligned_src_quat={src_quat}, dest_center={dst_center}, dst_quat={dst_quat}"
+            )
         else:
             src_center = ee_world.mean(axis=0)
             src_quat = np.asarray(dst_quat, dtype=np.float64).copy()
@@ -445,11 +537,13 @@ class KeyframeRetargeterNode(Node):
             size=dst_box_used.size.copy(),
             quat_wxyz=src_box.quat_wxyz.copy(),
         )
-        targets_infer = infer_scaled_targets_with_corner_surface_alignment(
+        # Preserve each hand's normalized box-relative position. In particular,
+        # identical source/destination box frames must not project the hands to
+        # a different face or otherwise change a valid training keyframe.
+        targets_infer = infer_scaled_targets(
             src_box=src_box,
             dst_box=dst_box_infer,
             ee_world=ee_world,
-            robot_root=q0[0:3].copy(),
         )
 
         src_forward_axis = self._infer_source_forward_axis(q0[3:7], src_box.quat_wxyz)
@@ -515,7 +609,7 @@ class KeyframeRetargeterNode(Node):
         relative_body_mask = np.vstack(relative_masks) if relative_masks else None
         relative_body_weight = np.asarray(relative_weights, dtype=np.float64) if relative_weights else 1.0
 
-        q_new, _ = solve_multi_ee_ik(
+        q_new, ik_residual_m = solve_multi_ee_ik(
             self._ik_model,
             self._ik_data,
             q_init=q_init,
@@ -526,6 +620,12 @@ class KeyframeRetargeterNode(Node):
             relative_body_mask=relative_body_mask,
             relative_body_weight=relative_body_weight,
         )
+        if not np.isfinite(ik_residual_m) or ik_residual_m > self._ik_max_residual_m:
+            raise RuntimeError(
+                f"Retargeting IK residual {ik_residual_m:.4f} m exceeds "
+                f"limit {self._ik_max_residual_m:.4f} m"
+            )
+        self.get_logger().info(f"Retargeting IK residual={ik_residual_m:.6f} m")
         self._write_ik_result_to_payload(payload, q_new)
 
     def _nearest_edge_root_pose(self, box_center: np.ndarray, box_quat_wxyz: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

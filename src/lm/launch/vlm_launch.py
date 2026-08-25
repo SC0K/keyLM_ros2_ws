@@ -1,3 +1,6 @@
+import os
+
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, TimerAction
 from launch.conditions import IfCondition
@@ -14,6 +17,7 @@ def generate_launch_description() -> LaunchDescription:
     camera_height = LaunchConfiguration("camera_height")
     camera_frame_id = LaunchConfiguration("camera_frame_id")
     camera_robot_xml = LaunchConfiguration("camera_robot_xml")
+    retargeter_robot_xml = LaunchConfiguration("retargeter_robot_xml")
     camera_name = LaunchConfiguration("camera_name")
     camera_lookat = LaunchConfiguration("camera_lookat")
     camera_distance = LaunchConfiguration("camera_distance")
@@ -36,6 +40,14 @@ def generate_launch_description() -> LaunchDescription:
     retargeted_keyframe_topic = LaunchConfiguration("retargeted_keyframe_topic")
     retargeted_info_topic = LaunchConfiguration("retargeted_info_topic")
 
+    default_retargeter_robot_xml = os.path.join(
+        get_package_share_directory("crl_humanoid_commons"),
+        "data",
+        "robots",
+        "g1_description",
+        "g1_29dof_crl.xml",
+    )
+
     return LaunchDescription(
         [
             DeclareLaunchArgument("image_topic", default_value="/camera/image_raw"),
@@ -46,20 +58,21 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("camera_height", default_value="480"),
             DeclareLaunchArgument("camera_frame_id", default_value="vlm_camera"),
             DeclareLaunchArgument("camera_robot_xml", default_value=""),
+            DeclareLaunchArgument("retargeter_robot_xml", default_value=default_retargeter_robot_xml),
             DeclareLaunchArgument("camera_name", default_value=""),
             DeclareLaunchArgument("camera_lookat", default_value="0.7 0.0 0.55"),
             DeclareLaunchArgument("camera_distance", default_value="2.4"),
             DeclareLaunchArgument("camera_azimuth", default_value="-135.0"),
             DeclareLaunchArgument("camera_elevation", default_value="-18.0"),
             DeclareLaunchArgument("service_name", default_value="/vlm/query"),
-            DeclareLaunchArgument("start_client", default_value="true"),
+            DeclareLaunchArgument("start_client", default_value="false"),
             DeclareLaunchArgument("client_delay_sec", default_value="2.0"),
             # Real robot topics: actual_box_pose_topic="/red_box/pose", robot_root_pose_topic="/g1_torso/pose".
             DeclareLaunchArgument("actual_box_pose_topic", default_value="/actual_box_pose"),
             DeclareLaunchArgument("robot_root_pose_topic", default_value=""),
             DeclareLaunchArgument("monitor_topic", default_value="/g1_sim/monitor"),
             DeclareLaunchArgument("tracking_error_topic", default_value="/tracking_errors"),
-            DeclareLaunchArgument("box_size_xyz", default_value="0.3 0.3 0.3"),
+            DeclareLaunchArgument("box_size_xyz", default_value="0.345 0.250 0.285"),
             DeclareLaunchArgument("stand_after_pick_height_m", default_value="0.8"),
             DeclareLaunchArgument("stand_before_place_height_m", default_value="0.8"),
             DeclareLaunchArgument("retarget_keyframe_service", default_value="/retargeter/generate_keyframe"),
@@ -67,7 +80,7 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("retargeted_info_topic", default_value="/retargeter/output_info"),
             DeclareLaunchArgument(
                 "task_text",
-                default_value="Pick up the box on the ground and place it on the table.",
+                default_value="Pick up the box on the ground and place it 1m at the front.",
             ),
             DeclareLaunchArgument("start_visualizer", default_value="true"),
             DeclareLaunchArgument("start_camera", default_value="true"),
@@ -117,6 +130,7 @@ def generate_launch_description() -> LaunchDescription:
                 parameters=[
                     {
                         "retarget_keyframe_service": retarget_keyframe_service,
+                        "robot_xml": retargeter_robot_xml,
                         "box_size_xyz": box_size_xyz,
                         "stand_after_pick_height_m": stand_after_pick_height_m,
                         "stand_before_place_height_m": stand_before_place_height_m,
