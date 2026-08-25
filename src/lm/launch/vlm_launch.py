@@ -33,6 +33,7 @@ def generate_launch_description() -> LaunchDescription:
     robot_root_pose_topic = LaunchConfiguration("robot_root_pose_topic")
     monitor_topic = LaunchConfiguration("monitor_topic")
     box_size_xyz = LaunchConfiguration("box_size_xyz")
+    source_box_size_xyz = LaunchConfiguration("source_box_size_xyz")
     stand_after_pick_height_m = LaunchConfiguration("stand_after_pick_height_m")
     stand_before_place_height_m = LaunchConfiguration("stand_before_place_height_m")
     tracking_error_topic = LaunchConfiguration("tracking_error_topic")
@@ -73,6 +74,7 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("monitor_topic", default_value="/g1_sim/monitor"),
             DeclareLaunchArgument("tracking_error_topic", default_value="/tracking_errors"),
             DeclareLaunchArgument("box_size_xyz", default_value="0.345 0.250 0.285"),
+            DeclareLaunchArgument("source_box_size_xyz", default_value="0.300 0.300 0.300"),
             DeclareLaunchArgument("stand_after_pick_height_m", default_value="0.8"),
             DeclareLaunchArgument("stand_before_place_height_m", default_value="0.8"),
             DeclareLaunchArgument("retarget_keyframe_service", default_value="/retargeter/generate_keyframe"),
@@ -132,6 +134,7 @@ def generate_launch_description() -> LaunchDescription:
                         "retarget_keyframe_service": retarget_keyframe_service,
                         "robot_xml": retargeter_robot_xml,
                         "box_size_xyz": box_size_xyz,
+                        "source_box_size_xyz": source_box_size_xyz,
                         "stand_after_pick_height_m": stand_after_pick_height_m,
                         "stand_before_place_height_m": stand_before_place_height_m,
                     }

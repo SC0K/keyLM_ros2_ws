@@ -9,7 +9,7 @@ from typing import Sequence
 import mujoco  # type: ignore[import-not-found]
 import numpy as np
 
-default_box_size = np.array([0.35, 0.35, 0.35], dtype=np.float64)
+default_box_size = np.array([0.30, 0.30, 0.30], dtype=np.float64)
 
 
 def _parse_vec3(text: str) -> np.ndarray:
@@ -185,6 +185,40 @@ def map_point_by_box_corner_reference(src_box: BoxFrame, dst_box: BoxFrame, poin
     return dst_box.local_to_world(dst_local[None, :])[0]
 
 
+def map_points_by_closest_box_corner(
+    src_box: BoxFrame,
+    dst_box: BoxFrame,
+    points_world: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Map points while preserving their vectors from the nearest box corners.
+
+    Corner identity is retained between boxes, but the corner itself moves with
+    the target half-extents. The unscaled corner-relative vector is then copied
+    into the target box frame, preserving its Euclidean distance exactly.
+    """
+    points = np.asarray(points_world, dtype=np.float64)
+    squeeze = points.ndim == 1
+    points = points.reshape(-1, 3)
+    source_local = src_box.world_to_local(points)
+    codes = _corner_codes()
+    source_corners_local = codes * src_box.half_extents[None, :]
+    nearest_indices = np.argmin(
+        np.linalg.norm(
+            source_local[:, None, :] - source_corners_local[None, :, :],
+            axis=2,
+        ),
+        axis=1,
+    )
+    nearest_codes = codes[nearest_indices]
+    source_corner_local = nearest_codes * src_box.half_extents[None, :]
+    target_corner_local = nearest_codes * dst_box.half_extents[None, :]
+    target_local = target_corner_local + (source_local - source_corner_local)
+    mapped = dst_box.local_to_world(target_local)
+    if squeeze:
+        return mapped[0], nearest_codes[0]
+    return mapped, nearest_codes
+
+
 def _get_body_pos(data: mujoco.MjData, body_id: int) -> np.ndarray:
     return np.asarray(data.xpos[body_id], dtype=np.float64).copy()
 
@@ -203,6 +237,7 @@ def solve_multi_ee_ik(
     relative_body_offsets: np.ndarray | None = None,
     relative_body_mask: np.ndarray | None = None,
     relative_body_weight: float | np.ndarray = 6.0,
+    active_base_dofs: Sequence[int] | None = None,
     max_iters: int = 80,
     pos_tol: float = 1e-4,
     damping: float = 1e-3,
@@ -215,10 +250,14 @@ def solve_multi_ee_ik(
     active = np.arange(nv, dtype=np.int32)
 
     # The caller has already placed the floating base at its retargeted root pose.
-    # Freeze all six base DoFs so IK cannot hide an unreachable hand target by
-    # sliding or rotating the whole robot away from that requested root pose.
+    # Freeze its DoFs by default; a caller may selectively enable base axes that
+    # do not violate its positional constraints (for example vertical motion).
     if nv >= 6:
-        active = active[6:]
+        requested_base_dofs = () if active_base_dofs is None else active_base_dofs
+        base_active = np.asarray(requested_base_dofs, dtype=np.int32).reshape(-1)
+        if np.any(base_active < 0) or np.any(base_active >= 6):
+            raise ValueError("active_base_dofs must only contain MuJoCo base velocity indices 0..5")
+        active = np.concatenate((base_active, active[6:]))
 
     def clamp_limited_joints() -> None:
         for joint_id in range(model.njnt):

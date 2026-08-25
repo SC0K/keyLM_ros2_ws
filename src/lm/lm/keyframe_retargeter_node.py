@@ -22,6 +22,7 @@ from lm.keyframe_box_retarget import (
     _pick_existing_default_ee,
     _pick_existing_default_feet,
     infer_scaled_targets,
+    map_points_by_closest_box_corner,
     solve_multi_ee_ik,
 )
 
@@ -203,13 +204,18 @@ class KeyframeRetargeterNode(Node):
             list(DEFAULT_BOX_SIZE_XYZ),
             descriptor=ParameterDescriptor(dynamic_typing=True),
         )
+        self.declare_parameter(
+            "source_box_size_xyz",
+            [0.3, 0.3, 0.3],
+            descriptor=ParameterDescriptor(dynamic_typing=True),
+        )
         self.declare_parameter("box_hold_forward_axis", "x")
         self.declare_parameter("stand_before_pick_offset_m", 0.2)
         self.declare_parameter("stand_after_pick_height_m", 0.9)
         self.declare_parameter("stand_before_place_height_m", 0.9)
         self.declare_parameter("foot_motion_penalty_weight", 0.1)
         self.declare_parameter("ee_root_penalty_weight", 2.0)
-        self.declare_parameter("ik_max_residual_m", 0.05)
+        self.declare_parameter("ik_max_residual_m", 0.06)
         self.declare_parameter(
             "dataset_box_reference_offset_rpy_deg",
             ISAAC_BOX_REFERENCE_OFFSET_RPY_DEG.tolist(),
@@ -219,6 +225,9 @@ class KeyframeRetargeterNode(Node):
 
         retarget_keyframe_service = str(self.get_parameter("retarget_keyframe_service").value)
         self._box_size_xyz = parse_box_size_xyz(self.get_parameter("box_size_xyz").value)
+        self._source_box_size_xyz = parse_box_size_xyz(
+            self.get_parameter("source_box_size_xyz").value
+        )
         self._box_hold_forward_axis = _normalize_axis_label(
             str(self.get_parameter("box_hold_forward_axis").value)
         )
@@ -281,10 +290,13 @@ class KeyframeRetargeterNode(Node):
         )
 
         self.get_logger().info(
-            "Retargeter service ready. service=%s. keyframes=%s. target_forward_axis=%s"
+            "Retargeter service ready. service=%s. keyframes=%s. "
+            "source_box_size=%s. target_box_size=%s. target_forward_axis=%s"
             % (
                 retarget_keyframe_service,
                 self._library_dir,
+                np.array2string(self._source_box_size_xyz, precision=3),
+                np.array2string(self._box_size_xyz, precision=3),
                 self._box_hold_forward_axis,
             )
         )
@@ -507,24 +519,42 @@ class KeyframeRetargeterNode(Node):
         ee_world = np.vstack([_get_body_pos(self._ik_data, bid) for bid in self._ik_ee_body_ids])
         if "object_position_xyz" in payload and "object_quat_wxyz" in payload:
             src_center = np.asarray(payload["object_position_xyz"], dtype=np.float64).copy()
-            dataset_src_quat = np.asarray(payload["object_quat_wxyz"], dtype=np.float64).copy()
-            if np.linalg.norm(dataset_src_quat) < 1e-12:
-                dataset_src_quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
-            src_quat = _remove_dataset_box_mesh_offset(
-                dataset_src_quat,
-                self._dataset_box_reference_offset_rpy_deg,
-            )
+            stored_src_quat = np.asarray(payload["object_quat_wxyz"], dtype=np.float64).copy()
+            if np.linalg.norm(stored_src_quat) < 1e-12:
+                stored_src_quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+            stored_frame_value = np.asarray(
+                payload.get("object_quat_frame", np.asarray("dataset_mesh"))
+            ).reshape(-1)[0]
+            if isinstance(stored_frame_value, bytes):
+                stored_frame = stored_frame_value.decode("utf-8")
+            else:
+                stored_frame = str(stored_frame_value)
+            if stored_frame == "physical_box":
+                src_quat = _quat_wxyz_normalize(stored_src_quat)
+            elif stored_frame == "dataset_mesh":
+                # Backward compatibility for older, unconverted libraries.
+                src_quat = _remove_dataset_box_mesh_offset(
+                    stored_src_quat,
+                    self._dataset_box_reference_offset_rpy_deg,
+                )
+            else:
+                raise ValueError(f"Unsupported object_quat_frame '{stored_frame}'")
             self.get_logger().info(
                 "Retargeting with object. "
-                f"src_center={src_center}, dataset_src_quat={dataset_src_quat}, "
-                f"axis_aligned_src_quat={src_quat}, dest_center={dst_center}, dst_quat={dst_quat}"
+                f"src_center={src_center}, stored_src_quat={stored_src_quat}, "
+                f"stored_frame={stored_frame}, physical_src_quat={src_quat}, "
+                f"dest_center={dst_center}, dst_quat={dst_quat}"
             )
         else:
             src_center = ee_world.mean(axis=0)
             src_quat = np.asarray(dst_quat, dtype=np.float64).copy()
             self.get_logger().info(f"Retargeting without object. Using ee to estimate: src_center={src_center}, src_quat={src_quat}")
 
-        src_box = BoxFrame(center=src_center, size=self._box_size_xyz.copy(), quat_wxyz=src_quat)
+        src_box = BoxFrame(
+            center=src_center,
+            size=self._source_box_size_xyz.copy(),
+            quat_wxyz=src_quat,
+        )
         preferred_dst_quat = np.asarray(dst_quat, dtype=np.float64).copy()
         dst_box_used = BoxFrame(
             center=np.asarray(dst_center, dtype=np.float64),
@@ -569,16 +599,27 @@ class KeyframeRetargeterNode(Node):
                 np.array2string(dst_forward_world, precision=3),
             )
         )
-        # Move base together with the source->target box frame transform.
+        # Preserve the root's horizontal vector (and therefore distance) from
+        # its closest box corner. Root height stays unchanged so changing box
+        # height cannot lift the feet or drive them through the floor. The
+        # horizontal base DoFs are frozen by IK, making this exact in XY.
+        src_corner_box = BoxFrame(
+            center=src_box.center.copy(),
+            size=src_box.size.copy(),
+            quat_wxyz=src_stage2_quat,
+        )
+        dst_corner_box = BoxFrame(
+            center=dst_box_used.center.copy(),
+            size=dst_box_used.size.copy(),
+            quat_wxyz=dst_stage2_quat,
+        )
         q_init = q0.copy()
         base_before = q0[0:3].copy()
-        base_mapped = map_points_by_frame_transform(
-            src_pos=src_box.center,
-            src_quat_wxyz=src_stage2_quat,
-            dst_pos=dst_box_used.center,
-            dst_quat_wxyz=dst_stage2_quat,
-            pts_world=base_before[None, :],
-        )[0]
+        base_mapped, root_corner_code = map_points_by_closest_box_corner(
+            src_corner_box,
+            dst_corner_box,
+            base_before,
+        )
         q_init[0:2] = base_mapped[0:2]
         q_init[3:7] = map_orientation_by_frame_transform(
             src_quat_wxyz=src_stage2_quat,
@@ -586,18 +627,39 @@ class KeyframeRetargeterNode(Node):
             quat_wxyz=q0[3:7],
         )
 
+        fixed_body_ids: list[int] = []
+        fixed_body_targets: list[np.ndarray] = []
+        fixed_body_masks: list[np.ndarray] = []
         relative_body_ids: list[int] = []
         relative_offsets: list[np.ndarray] = []
         relative_masks: list[np.ndarray] = []
         relative_weights: list[float] = []
         if self._ik_foot_body_ids:
-            self._ik_data.qpos[:] = q_init
+            self._ik_data.qpos[:] = q0
             mujoco.mj_forward(self._ik_model, self._ik_data)
-            foot_positions = np.vstack([_get_body_pos(self._ik_data, bid) for bid in self._ik_foot_body_ids])
-            relative_body_ids.extend(self._ik_foot_body_ids)
-            relative_offsets.append(foot_positions - q_init[0:3][None, :])
-            relative_masks.append(np.ones((len(self._ik_foot_body_ids), 3), dtype=np.float64))
-            relative_weights.extend([self._foot_motion_penalty_weight] * len(self._ik_foot_body_ids))
+            source_feet = np.vstack(
+                [_get_body_pos(self._ik_data, body_id) for body_id in self._ik_foot_body_ids]
+            )
+            foot_targets, foot_corner_codes = map_points_by_closest_box_corner(
+                src_corner_box,
+                dst_corner_box,
+                source_feet,
+            )
+            # Corner-distance preservation is horizontal. Keep the trained foot
+            # height exactly, independent of source/target box center height.
+            foot_targets[:, 2] = source_feet[:, 2]
+            fixed_body_ids.extend(self._ik_foot_body_ids)
+            fixed_body_targets.extend(foot_targets)
+            fixed_body_masks.extend(
+                np.ones((len(self._ik_foot_body_ids), 3), dtype=np.float64)
+            )
+            self.get_logger().info(
+                "Closest box corners | root=%s | feet=%s"
+                % (
+                    np.array2string(root_corner_code, precision=0),
+                    np.array2string(foot_corner_codes, precision=0),
+                )
+            )
 
         if self._ee_root_penalty_weight > 0.0:
             relative_body_ids.extend(self._ik_ee_body_ids)
@@ -615,10 +677,17 @@ class KeyframeRetargeterNode(Node):
             q_init=q_init,
             body_ids=self._ik_ee_body_ids,
             target_positions=targets,
+            fixed_body_ids=fixed_body_ids,
+            fixed_body_targets=np.vstack(fixed_body_targets) if fixed_body_targets else None,
+            fixed_body_mask=np.vstack(fixed_body_masks) if fixed_body_masks else None,
+            fixed_body_weight=self._foot_motion_penalty_weight,
             relative_body_ids=relative_body_ids,
             relative_body_offsets=relative_body_offsets,
             relative_body_mask=relative_body_mask,
             relative_body_weight=relative_body_weight,
+            # Preserve horizontal root/corner distance exactly, while allowing
+            # vertical base motion to accommodate the changed box height.
+            active_base_dofs=(2,),
         )
         if not np.isfinite(ik_residual_m) or ik_residual_m > self._ik_max_residual_m:
             raise RuntimeError(
