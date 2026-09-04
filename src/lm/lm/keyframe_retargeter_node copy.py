@@ -12,6 +12,7 @@ from geometry_msgs.msg import PoseStamped
 from rclpy.node import Node
 from std_msgs.msg import Bool, String, UInt8MultiArray
 
+from lm.box_config import REAL_TARGET_BOX_GEOMETRY
 from lm.keyframe_box_retarget import (
     BoxFrame,
     _default_robot_xml,
@@ -88,7 +89,10 @@ class KeyframeRetargeterNode(Node):
         self.declare_parameter("retargeted_keyframe_topic", "/retargeter/output_keyframe")
         self.declare_parameter("retargeted_info_topic", "/retargeter/output_info")
         self.declare_parameter("library_dir", "")
-        self.declare_parameter("box_size_xyz", [0.35, 0.35, 0.35])
+        self.declare_parameter(
+            "box_size_xyz",
+            list(REAL_TARGET_BOX_GEOMETRY.size_xyz),
+        )
         self.declare_parameter("stand_before_pick_offset_m", 0.2)
         self.declare_parameter("stand_before_place_height_m", 1.0)
         self.declare_parameter("robot", "g1")

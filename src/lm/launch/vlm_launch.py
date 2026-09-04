@@ -4,8 +4,18 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, TimerAction
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
+
+from lm.box_config import (
+    DEFAULT_TARGET_BOX_ORIENTATION_OFFSET_RPY_DEG,
+    REAL_TARGET_BOX_GEOMETRY,
+    SIM_TARGET_BOX_GEOMETRY,
+    SOURCE_BOX_GEOMETRY,
+    format_box_size_xyz,
+    format_orientation_offset_rpy_deg,
+)
 
 
 def generate_launch_description() -> LaunchDescription:
@@ -34,8 +44,16 @@ def generate_launch_description() -> LaunchDescription:
     monitor_topic = LaunchConfiguration("monitor_topic")
     box_size_xyz = LaunchConfiguration("box_size_xyz")
     source_box_size_xyz = LaunchConfiguration("source_box_size_xyz")
+    source_box_forward_axis = LaunchConfiguration("source_box_forward_axis")
+    source_box_up_axis = LaunchConfiguration("source_box_up_axis")
+    box_hold_forward_axis = LaunchConfiguration("box_hold_forward_axis")
+    box_hold_up_axis = LaunchConfiguration("box_hold_up_axis")
+    target_box_orientation_offset_rpy_deg = LaunchConfiguration(
+        "target_box_orientation_offset_rpy_deg"
+    )
     stand_after_pick_height_m = LaunchConfiguration("stand_after_pick_height_m")
     stand_before_place_height_m = LaunchConfiguration("stand_before_place_height_m")
+    ik_max_residual_m = LaunchConfiguration("ik_max_residual_m")
     tracking_error_topic = LaunchConfiguration("tracking_error_topic")
     retarget_keyframe_service = LaunchConfiguration("retarget_keyframe_service")
     retargeted_keyframe_topic = LaunchConfiguration("retargeted_keyframe_topic")
@@ -48,6 +66,9 @@ def generate_launch_description() -> LaunchDescription:
         "g1_description",
         "g1_29dof_crl.xml",
     )
+    source_box_size_default = format_box_size_xyz(SOURCE_BOX_GEOMETRY.size_xyz)
+    real_box_size_default = format_box_size_xyz(REAL_TARGET_BOX_GEOMETRY.size_xyz)
+    sim_box_size_default = format_box_size_xyz(SIM_TARGET_BOX_GEOMETRY.size_xyz)
 
     return LaunchDescription(
         [
@@ -73,10 +94,68 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("robot_root_pose_topic", default_value=""),
             DeclareLaunchArgument("monitor_topic", default_value="/g1_sim/monitor"),
             DeclareLaunchArgument("tracking_error_topic", default_value="/tracking_errors"),
-            DeclareLaunchArgument("box_size_xyz", default_value="0.345 0.250 0.285"),
-            DeclareLaunchArgument("source_box_size_xyz", default_value="0.300 0.300 0.300"),
+            DeclareLaunchArgument(
+                "box_size_xyz",
+                default_value=PythonExpression(
+                    [
+                        repr(sim_box_size_default),
+                        " if '",
+                        camera_backend,
+                        "' == 'mujoco' else ",
+                        repr(real_box_size_default),
+                    ]
+                ),
+                description=(
+                    "Target box dimensions in XYZ. Defaults to the MuJoCo box "
+                    "for simulation and the real target profile otherwise."
+                ),
+            ),
+            DeclareLaunchArgument("source_box_size_xyz", default_value=source_box_size_default),
+            DeclareLaunchArgument(
+                "source_box_forward_axis",
+                default_value=SOURCE_BOX_GEOMETRY.forward_axis,
+            ),
+            DeclareLaunchArgument(
+                "source_box_up_axis",
+                default_value=SOURCE_BOX_GEOMETRY.up_axis,
+            ),
+            DeclareLaunchArgument(
+                "box_hold_forward_axis",
+                default_value=PythonExpression(
+                    [
+                        repr(SIM_TARGET_BOX_GEOMETRY.forward_axis),
+                        " if '",
+                        camera_backend,
+                        "' == 'mujoco' else ",
+                        repr(REAL_TARGET_BOX_GEOMETRY.forward_axis),
+                    ]
+                ),
+            ),
+            DeclareLaunchArgument(
+                "box_hold_up_axis",
+                default_value=PythonExpression(
+                    [
+                        repr(SIM_TARGET_BOX_GEOMETRY.up_axis),
+                        " if '",
+                        camera_backend,
+                        "' == 'mujoco' else ",
+                        repr(REAL_TARGET_BOX_GEOMETRY.up_axis),
+                    ]
+                ),
+            ),
+            DeclareLaunchArgument(
+                "target_box_orientation_offset_rpy_deg",
+                default_value=format_orientation_offset_rpy_deg(
+                    DEFAULT_TARGET_BOX_ORIENTATION_OFFSET_RPY_DEG
+                ),
+                description=(
+                    "Optional local-frame XYZ roll/pitch/yaw correction in degrees, "
+                    "post-multiplied onto the retargeted target-box orientation."
+                ),
+            ),
             DeclareLaunchArgument("stand_after_pick_height_m", default_value="0.8"),
             DeclareLaunchArgument("stand_before_place_height_m", default_value="0.8"),
+            DeclareLaunchArgument("ik_max_residual_m", default_value="0.01"),
             DeclareLaunchArgument("retarget_keyframe_service", default_value="/retargeter/generate_keyframe"),
             DeclareLaunchArgument("retargeted_keyframe_topic", default_value="/retargeter/output_keyframe"),
             DeclareLaunchArgument("retargeted_info_topic", default_value="/retargeter/output_info"),
@@ -135,8 +214,16 @@ def generate_launch_description() -> LaunchDescription:
                         "robot_xml": retargeter_robot_xml,
                         "box_size_xyz": box_size_xyz,
                         "source_box_size_xyz": source_box_size_xyz,
+                        "source_box_forward_axis": source_box_forward_axis,
+                        "source_box_up_axis": source_box_up_axis,
+                        "box_hold_forward_axis": box_hold_forward_axis,
+                        "box_hold_up_axis": box_hold_up_axis,
                         "stand_after_pick_height_m": stand_after_pick_height_m,
                         "stand_before_place_height_m": stand_before_place_height_m,
+                        "ik_max_residual_m": ParameterValue(
+                            ik_max_residual_m,
+                            value_type=float,
+                        ),
                     }
                 ],
             ),
@@ -169,6 +256,10 @@ def generate_launch_description() -> LaunchDescription:
                                 "monitor_topic": monitor_topic,
                                 "tracking_error_topic": tracking_error_topic,
                                 "box_size_xyz": box_size_xyz,
+                                "default_box_forward_axis": box_hold_forward_axis,
+                                "target_box_orientation_offset_rpy_deg": (
+                                    target_box_orientation_offset_rpy_deg
+                                ),
                                 "stand_after_pick_height_m": stand_after_pick_height_m,
                                 "stand_before_place_height_m": stand_before_place_height_m,
                                 "retarget_keyframe_service": retarget_keyframe_service,

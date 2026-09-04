@@ -22,7 +22,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image as ImageMsg
 from std_msgs.msg import String
 
-from lm.box_config import DEFAULT_BOX_SIZE_XYZ
+from lm.box_config import SIM_TARGET_BOX_GEOMETRY, parse_box_size_xyz
 
 GOAL_BODY_LINKS = (
     (0, 1),
@@ -128,6 +128,10 @@ class PlannerAppNode(Node):
         self.declare_parameter("planner_status_topic", "/vlm_planner/status")
         self.declare_parameter("planner_decision_topic", "/vlm_planner/decision")
         self.declare_parameter("vlm_request_image_topic", "/vlm/request_image")
+        self.declare_parameter(
+            "box_size_xyz",
+            list(SIM_TARGET_BOX_GEOMETRY.size_xyz),
+        )
 
         self._lock = threading.Lock()
         self.robot_pos: np.ndarray | None = None
@@ -143,6 +147,9 @@ class PlannerAppNode(Node):
         self.last_decision: dict = {}
         self.request_image_rgb: np.ndarray | None = None
         self.request_image_stamp = ""
+        self.box_size_xyz = parse_box_size_xyz(
+            self.get_parameter("box_size_xyz").value
+        )
 
         self.create_subscription(
             Monitor,
@@ -296,6 +303,7 @@ class PlannerAppNode(Node):
                 "last_decision": dict(self.last_decision),
                 "request_image_rgb": None if self.request_image_rgb is None else self.request_image_rgb.copy(),
                 "request_image_stamp": self.request_image_stamp,
+                "box_size_xyz": self.box_size_xyz.copy(),
             }
 
 
@@ -650,15 +658,15 @@ class VLMPlannerApp:
 
         if snap["keyframe_object"] is not None:
             x, y = to_px(snap["keyframe_object"][:2])
-            half_x = 0.5 * DEFAULT_BOX_SIZE_XYZ[0] * scale
-            half_y = 0.5 * DEFAULT_BOX_SIZE_XYZ[1] * scale
+            half_x = 0.5 * snap["box_size_xyz"][0] * scale
+            half_y = 0.5 * snap["box_size_xyz"][1] * scale
             canvas.create_rectangle(x - half_x, y - half_y, x + half_x, y + half_y, outline="#f59e0b", width=3)
             canvas.create_text(x + 14, y - 14, text="keyframe object", anchor="w", fill="#92400e")
 
         if snap["box_pos"] is not None:
             x, y = to_px(snap["box_pos"][:2])
-            half_x = 0.5 * DEFAULT_BOX_SIZE_XYZ[0] * scale
-            half_y = 0.5 * DEFAULT_BOX_SIZE_XYZ[1] * scale
+            half_x = 0.5 * snap["box_size_xyz"][0] * scale
+            half_y = 0.5 * snap["box_size_xyz"][1] * scale
             canvas.create_rectangle(x - half_x, y - half_y, x + half_x, y + half_y, fill="#ef4444", outline="#991b1b", width=2)
             canvas.create_text(x + half_x + 8, y, text="box", anchor="w", fill="#7f1d1d")
 

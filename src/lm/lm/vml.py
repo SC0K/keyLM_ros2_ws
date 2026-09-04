@@ -14,7 +14,15 @@ from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.node import Node
 from std_msgs.msg import String, UInt8MultiArray
 
-from lm.box_config import DEFAULT_BOX_SIZE_XYZ, parse_box_size_xyz
+from lm.box_config import (
+    DEFAULT_TARGET_BOX_ORIENTATION_OFFSET_RPY_DEG,
+    DEFAULT_TARGET_BOX_QUAT_WXYZ,
+    REAL_TARGET_BOX_GEOMETRY,
+    format_orientation_offset_rpy_deg,
+    parse_box_size_xyz,
+    parse_orientation_offset_rpy_deg,
+)
+from lm.box_orientation import apply_target_box_orientation_offset
 from lm_interfaces.srv import RetargetKeyframe, VLMQuery
 
 
@@ -144,24 +152,36 @@ class VLMClientNode(Node):
         self.declare_parameter("planner_status_topic", "/vlm_planner/status")
         self.declare_parameter("planner_decision_topic", "/vlm_planner/decision")
         self.declare_parameter("retarget_timeout_sec", 10.0)
-        self.declare_parameter("current_box_quat_wxyz", [1.0, 0.0, 0.0, 0.0])
+        self.declare_parameter("current_box_quat_wxyz", list(DEFAULT_TARGET_BOX_QUAT_WXYZ))
         self.declare_parameter("actual_box_pose_timeout_sec", 2.0)
         self.declare_parameter("monitor_timeout_sec", 2.0)
         self.declare_parameter(
             "box_size_xyz",
-            list(DEFAULT_BOX_SIZE_XYZ),
+            list(REAL_TARGET_BOX_GEOMETRY.size_xyz),
             descriptor=ParameterDescriptor(dynamic_typing=True),
         )
         self.declare_parameter("default_place_distance_m", 1.0)
-        self.declare_parameter("stand_before_pick_offset_m", 0.45)
+        self.declare_parameter("stand_before_pick_offset_m", 0.3)
         self.declare_parameter("pick_max_horizontal_distance_m", 0.5)
         self.declare_parameter("stand_after_pick_height_m", 1.0)
         self.declare_parameter("stand_before_place_height_m", 1.0)
         self.declare_parameter("min_stand_root_height_m", 0.78)
         self.declare_parameter("default_target_root_center", [0.0, 0.0, 0.78])  # TODO: find the correct target root pose for root mode (navifation)
         self.declare_parameter("default_target_root_quat_wxyz", [ 1.0, 0.0, 0.0,  0.0])
-        self.declare_parameter("default_target_box_quat_wxyz", [1.0, 0.0, 0.0,  0.0])
-        self.declare_parameter("default_box_forward_axis", "x")
+        self.declare_parameter(
+            "default_target_box_quat_wxyz",
+            list(DEFAULT_TARGET_BOX_QUAT_WXYZ),
+        )
+        self.declare_parameter(
+            "target_box_orientation_offset_rpy_deg",
+            format_orientation_offset_rpy_deg(
+                DEFAULT_TARGET_BOX_ORIENTATION_OFFSET_RPY_DEG
+            ),
+        )
+        self.declare_parameter(
+            "default_box_forward_axis",
+            REAL_TARGET_BOX_GEOMETRY.forward_axis,
+        )
         self.declare_parameter("stationary_hold_sec", 1.0)
         self.declare_parameter("min_action_duration_sec", 1.0)
         self.declare_parameter("robot_linear_stationary_threshold_mps", 0.1)
@@ -238,6 +258,13 @@ class VLMClientNode(Node):
         )
         self._default_target_box_quat_wxyz = np.asarray(
             self.get_parameter("default_target_box_quat_wxyz").value, dtype=np.float64
+        )
+        self._target_box_orientation_offset_rpy_deg = (
+            parse_orientation_offset_rpy_deg(
+                self.get_parameter(
+                    "target_box_orientation_offset_rpy_deg"
+                ).value
+            )
         )
         self.box_forward_axis = _normalize_axis_label(self.get_parameter("default_box_forward_axis").value)
         self._box_forward_axis_initialized_from_robot = False
@@ -521,30 +548,87 @@ class VLMClientNode(Node):
 
         if not (self._has_robot_root_pose or self._has_monitor):
             self.get_logger().warn(
-                "No robot root pose or monitor message received before timeout; using identity robot pose for box forward axis."
+                "No robot root pose or monitor message received before timeout; "
+                "cannot determine the desired pickup approach."
             )
             return False
         return True
 
-    def _update_box_forward_axis_from_robot(self) -> None:
-        previous_axis = self.box_forward_axis
-        robot_forward_world = _quat_wxyz_to_rotmat(self._current_robot_quat_wxyz)[:, 0]
-        robot_forward_world[2] = 0.0
-        self.box_forward_axis = _infer_axis_label_from_world_dir(
-            self._current_box_quat_wxyz,
-            robot_forward_world,
+    def _stand_before_pick_root_pose(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return the nearest-edge root pose used to approach the starting box."""
+        if not self._has_actual_box_pose:
+            raise RuntimeError("Cannot compute a pickup approach without an actual box pose")
+        if not (self._has_robot_root_pose or self._has_monitor):
+            raise RuntimeError("Cannot compute a pickup approach without a robot root pose")
+
+        start_box_center, start_box_quat = self._fixed_start_box_pose()
+        rot = _quat_wxyz_to_rotmat(start_box_quat)
+        hx = 0.5 * float(self._box_size_xyz[0])
+        hy = 0.5 * float(self._box_size_xyz[1])
+        edge_centers_local = np.array(
+            [[hx, 0.0, 0.0], [-hx, 0.0, 0.0], [0.0, hy, 0.0], [0.0, -hy, 0.0]],
+            dtype=np.float64,
         )
-        if not self._box_forward_axis_initialized_from_robot:
-            self.get_logger().info(
-                "Initialized box_forward_axis from robot orientation: %s"
-                % self.box_forward_axis
+        edge_centers_world = edge_centers_local @ rot.T + start_box_center[None, :]
+        robot_xy = self._current_robot_center[:2]
+        nearest_idx = int(
+            np.argmin(np.linalg.norm(edge_centers_world[:, :2] - robot_xy[None, :], axis=1))
+        )
+        edge_center = edge_centers_world[nearest_idx]
+        outward = edge_center[:2] - start_box_center[:2]
+        outward_norm = float(np.linalg.norm(outward))
+        if outward_norm < 1e-9:
+            outward = np.array([1.0, 0.0], dtype=np.float64)
+        else:
+            outward = outward / outward_norm
+
+        root_xy = edge_center[:2] + self._stand_before_pick_offset_m * outward
+        root_z_candidates = [
+            float(self._default_target_root_center[2]),
+            self._min_stand_root_height_m,
+        ]
+        if self._current_robot_center[2] > 0.0:
+            root_z_candidates.append(float(self._current_robot_center[2]))
+        root_center = np.array(
+            [root_xy[0], root_xy[1], max(root_z_candidates)],
+            dtype=np.float64,
+        )
+        facing_dir = -outward
+        root_quat = _yaw_to_quat_wxyz(float(math.atan2(facing_dir[1], facing_dir[0])))
+        return root_center, root_quat
+
+    def _update_box_forward_axis_from_robot_once(self) -> bool:
+        """Latch the physical box axis aligned with the desired pickup approach."""
+        if self._box_forward_axis_initialized_from_robot:
+            return True
+        if not self._has_actual_box_pose:
+            self.get_logger().warn(
+                "Cannot latch box_forward_axis before receiving the actual box pose."
             )
-        elif self.box_forward_axis != previous_axis:
-            self.get_logger().info(
-                "Updated box_forward_axis from robot/object orientation: %s"
-                % self.box_forward_axis
+            return False
+        if not (self._has_robot_root_pose or self._has_monitor):
+            self.get_logger().warn(
+                "Cannot latch box_forward_axis before receiving a valid robot root pose."
             )
+            return False
+
+        pickup_root_center, pickup_root_quat = self._stand_before_pick_root_pose()
+        pickup_forward_world = _quat_wxyz_to_rotmat(pickup_root_quat)[:, 0]
+        _, start_box_quat = self._fixed_start_box_pose()
+        self.box_forward_axis = _infer_axis_label_from_world_dir(
+            start_box_quat,
+            pickup_forward_world,
+        )
         self._box_forward_axis_initialized_from_robot = True
+        self.get_logger().info(
+            "Latched box_forward_axis from desired nearest-edge pickup approach: "
+            "axis=%s pickup_root=%s"
+            % (
+                self.box_forward_axis,
+                np.array2string(pickup_root_center, precision=3),
+            )
+        )
+        return True
 
     def _stationary_flags(self) -> tuple[bool, bool, bool]:
         robot_stationary = (
@@ -679,18 +763,30 @@ class VLMClientNode(Node):
     def initialize_task_target_once(self) -> bool:
         if self._task_target_box_center is not None:
             return True
-        if not self._has_actual_box_pose:
+        if not self._has_actual_box_pose or not (self._has_robot_root_pose or self._has_monitor):
             return False
 
-        self._update_box_forward_axis_from_robot()
+        if not self._update_box_forward_axis_from_robot_once():
+            return False
         self._task_target_box_center = self._default_task_target_box_center()
-        self._task_target_box_quat_wxyz = _normalize_quat_wxyz(self._default_target_box_quat_wxyz.copy())
+        nominal_target_quat = _normalize_quat_wxyz(
+            self._default_target_box_quat_wxyz.copy()
+        )
+        self._task_target_box_quat_wxyz = apply_target_box_orientation_offset(
+            nominal_target_quat,
+            self._target_box_orientation_offset_rpy_deg,
+        )
         self._task_target_initialized_time = time.monotonic()
         self.get_logger().info(
-            "Initialized fixed task target box pose: position=%s quat=%s"
+            "Initialized fixed task target box pose: position=%s quat=%s "
+            "local_orientation_offset_rpy_deg=%s"
             % (
                 np.array2string(self._task_target_box_center, precision=3),
                 np.array2string(self._task_target_box_quat_wxyz, precision=3),
+                np.array2string(
+                    self._target_box_orientation_offset_rpy_deg,
+                    precision=3,
+                ),
             )
         )
         self.publish_status(
@@ -698,6 +794,9 @@ class VLMClientNode(Node):
             "Initialized fixed task target box pose",
             target_box_position_xyz=self._task_target_box_center.tolist(),
             target_box_quat_wxyz=self._task_target_box_quat_wxyz.tolist(),
+            target_box_orientation_offset_rpy_deg=(
+                self._target_box_orientation_offset_rpy_deg.tolist()
+            ),
             target_direction_world_xyz=_GLOBAL_X_WORLD.tolist(),
             target_source="starting_box_pose_plus_global_x",
             box_forward_axis=self.box_forward_axis,
@@ -871,7 +970,7 @@ class VLMClientNode(Node):
             )
             response.object_in_manipulation = True
         if object_to_manipulate:
-            self._update_box_forward_axis_from_robot()
+            self._update_box_forward_axis_from_robot_once()
 
         start_box_center, start_box_quat = self._fixed_start_box_pose()
         retarget_current_box_source = (
@@ -914,29 +1013,7 @@ class VLMClientNode(Node):
         target_root_center = self._default_target_root_center.copy()
         target_root_quat = self._default_target_root_quat_wxyz.copy()
         if response.next_keyframe == "stand_before_pick":
-            # Compute stand-before-pick root target in VLM client.
-            rot = _quat_wxyz_to_rotmat(start_box_quat)
-            hx, hy = 0.5 * float(self._box_size_xyz[0]), 0.5 * float(self._box_size_xyz[1])
-            edge_centers_local = np.array([[hx, 0, 0], [-hx, 0, 0], [0, hy, 0], [0, -hy, 0]], dtype=np.float64)
-            edge_centers_world = edge_centers_local @ rot.T + start_box_center[None, :]
-            robot_xy = self._current_robot_center[:2] if (self._has_robot_root_pose or self._has_monitor) else np.zeros(2)
-            dists = np.linalg.norm(edge_centers_world[:, :2] - robot_xy[None, :], axis=1)
-            nearest_idx = int(np.argmin(dists))
-            edge_center = edge_centers_world[nearest_idx]
-            outward = edge_center[:2] - start_box_center[:2]
-            n = np.linalg.norm(outward)
-            if n < 1e-9:
-                outward = np.array([1.0, 0.0], dtype=np.float64)
-            else:
-                outward = outward / n
-            root_xy = edge_center[:2] + self._stand_before_pick_offset_m * outward
-            facing_dir = -outward
-            root_z_candidates = [float(self._default_target_root_center[2]), self._min_stand_root_height_m]
-            if (self._has_robot_root_pose or self._has_monitor) and self._current_robot_center[2] > 0.0:
-                root_z_candidates.append(float(self._current_robot_center[2]))
-            root_z = max(root_z_candidates)
-            target_root_center = np.array([root_xy[0], root_xy[1], root_z], dtype=np.float64)
-            target_root_quat = _yaw_to_quat_wxyz(float(math.atan2(facing_dir[1], facing_dir[0])))
+            target_root_center, target_root_quat = self._stand_before_pick_root_pose()
         elif response.next_keyframe == "stand_after_place":
             if self._has_robot_root_pose or self._has_monitor:
                 target_root_center = self._current_robot_center.copy()
@@ -1046,7 +1123,12 @@ def main(args: list[str] | None = None) -> None:
                 "Cannot start VLM planner until the starting box pose has been received.",
             )
             raise RuntimeError("Cannot initialize fixed task target without starting box pose")
-        node.wait_for_robot_pose(float(node.get_parameter("monitor_timeout_sec").value))
+        if not node.wait_for_robot_pose(float(node.get_parameter("monitor_timeout_sec").value)):
+            node.publish_status(
+                "missing_start_robot_pose",
+                "Cannot determine the desired pickup approach without a robot root pose.",
+            )
+            raise RuntimeError("Cannot initialize pickup approach without robot root pose")
         if not node.initialize_task_target_once():
             node.publish_status(
                 "missing_task_target",

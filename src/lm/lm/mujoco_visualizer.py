@@ -12,6 +12,8 @@ from geometry_msgs.msg import PoseStamped
 from rclpy.node import Node
 from std_msgs.msg import UInt8MultiArray
 
+from lm.box_config import SIM_TARGET_BOX_GEOMETRY
+
 
 def _quat_wxyz_to_rotmat(q: np.ndarray) -> np.ndarray:
     q = np.asarray(q, dtype=np.float64)
@@ -52,7 +54,7 @@ class MujocoVisualizerNode(Node):
         self.declare_parameter("current_box_pose_topic", "/actual_box_pose")
         self.declare_parameter("target_box_pose_topic", "/vlm/target_box_pose")
         self.declare_parameter("retargeted_keyframe_topic", "/retargeter/output_keyframe")
-        self.declare_parameter("box_size_xyz", [0.3, 0.3, 0.3])
+        self.declare_parameter("box_size_xyz", list(SIM_TARGET_BOX_GEOMETRY.size_xyz))
 
         self._lock = threading.Lock()
         self._box_size_xyz = np.asarray(self.get_parameter("box_size_xyz").value, dtype=np.float64)

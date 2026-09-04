@@ -9,7 +9,22 @@ from typing import Sequence
 import mujoco  # type: ignore[import-not-found]
 import numpy as np
 
-default_box_size = np.array([0.30, 0.30, 0.30], dtype=np.float64)
+from lm.box_config import (
+    DEFAULT_TARGET_BOX_QUAT_WXYZ,
+    SOURCE_BOX_GEOMETRY,
+)
+
+
+default_box_size = np.asarray(SOURCE_BOX_GEOMETRY.size_xyz, dtype=np.float64)
+
+BOX_AXIS_TO_LOCAL_VEC = {
+    "x": np.array([1.0, 0.0, 0.0], dtype=np.float64),
+    "-x": np.array([-1.0, 0.0, 0.0], dtype=np.float64),
+    "y": np.array([0.0, 1.0, 0.0], dtype=np.float64),
+    "-y": np.array([0.0, -1.0, 0.0], dtype=np.float64),
+    "z": np.array([0.0, 0.0, 1.0], dtype=np.float64),
+    "-z": np.array([0.0, 0.0, -1.0], dtype=np.float64),
+}
 
 
 def _parse_vec3(text: str) -> np.ndarray:
@@ -60,6 +75,14 @@ def _quat_wxyz_conj(q: np.ndarray) -> np.ndarray:
     return np.array([q[0], -q[1], -q[2], -q[3]], dtype=np.float64)
 
 
+def _quat_wxyz_normalize(q: np.ndarray) -> np.ndarray:
+    quat = np.asarray(q, dtype=np.float64).reshape(4)
+    norm = float(np.linalg.norm(quat))
+    if not np.isfinite(norm) or norm < 1e-12:
+        raise ValueError("Cannot normalize a zero or non-finite quaternion")
+    return quat / norm
+
+
 def _yaw_only_quat_from_wxyz(q: np.ndarray) -> np.ndarray:
     """Extract world yaw (about z) from MuJoCo wxyz quaternion."""
     q = np.asarray(q, dtype=np.float64)
@@ -91,6 +114,119 @@ class BoxFrame:
 
     def local_to_world(self, pts_l: np.ndarray) -> np.ndarray:
         return pts_l @ self.rot.T + self.center
+
+
+def normalize_box_axis(axis_label: str) -> str:
+    axis = str(axis_label).strip().lower()
+    if axis not in BOX_AXIS_TO_LOCAL_VEC:
+        raise ValueError(
+            f"Unsupported box axis '{axis_label}'. "
+            f"Use one of: {list(BOX_AXIS_TO_LOCAL_VEC)}"
+        )
+    return axis
+
+
+def box_axis_dimension_index(axis_label: str) -> int:
+    axis = normalize_box_axis(axis_label)
+    return {"x": 0, "y": 1, "z": 2}[axis.lstrip("-")]
+
+
+def infer_box_axis_from_world_direction(
+    box_quat_wxyz: np.ndarray,
+    world_direction: np.ndarray,
+    excluded_axis: str | None = None,
+) -> str:
+    """Return the signed physical box axis closest to a world direction."""
+    direction = np.asarray(world_direction, dtype=np.float64).reshape(3)
+    direction_norm = float(np.linalg.norm(direction))
+    if direction_norm < 1e-12:
+        raise ValueError("Cannot infer a box axis from a zero world direction")
+    direction /= direction_norm
+    excluded_index = None
+    if excluded_axis is not None:
+        excluded_index = box_axis_dimension_index(excluded_axis)
+    box_rot = _quat_wxyz_to_rotmat(_quat_wxyz_normalize(box_quat_wxyz))
+    candidates = {
+        label: box_rot @ local_axis
+        for label, local_axis in BOX_AXIS_TO_LOCAL_VEC.items()
+        if excluded_index is None or box_axis_dimension_index(label) != excluded_index
+    }
+    return max(candidates, key=lambda label: float(np.dot(candidates[label], direction)))
+
+
+def matched_box_rotation(
+    box_quat_wxyz: np.ndarray,
+    forward_axis: str,
+    up_axis: str,
+) -> np.ndarray:
+    """Build a forward/side/up rotation from selected physical box axes."""
+    forward_axis = normalize_box_axis(forward_axis)
+    up_axis = normalize_box_axis(up_axis)
+    if box_axis_dimension_index(forward_axis) == box_axis_dimension_index(up_axis):
+        raise ValueError("Box forward and up axes must use different dimensions")
+
+    box_rot = _quat_wxyz_to_rotmat(_quat_wxyz_normalize(box_quat_wxyz))
+    forward = box_rot @ BOX_AXIS_TO_LOCAL_VEC[forward_axis]
+    forward /= max(float(np.linalg.norm(forward)), 1e-12)
+    up_raw = box_rot @ BOX_AXIS_TO_LOCAL_VEC[up_axis]
+    up = up_raw - float(np.dot(up_raw, forward)) * forward
+    up /= max(float(np.linalg.norm(up)), 1e-12)
+    side = np.cross(up, forward)
+    side /= max(float(np.linalg.norm(side)), 1e-12)
+    up = np.cross(forward, side)
+    up /= max(float(np.linalg.norm(up)), 1e-12)
+    return np.column_stack([forward, side, up])
+
+
+def box_size_in_matched_frame(
+    size_xyz: np.ndarray,
+    forward_axis: str,
+    up_axis: str,
+) -> np.ndarray:
+    """Reorder physical XYZ dimensions into forward/side/up order."""
+    size = np.asarray(size_xyz, dtype=np.float64).reshape(3)
+    if not np.all(np.isfinite(size)) or np.any(size <= 0.0):
+        raise ValueError(f"Box dimensions must be positive and finite, got {size}")
+    forward_index = box_axis_dimension_index(forward_axis)
+    up_index = box_axis_dimension_index(up_axis)
+    if forward_index == up_index:
+        raise ValueError("Box forward and up axes must use different dimensions")
+    side_index = next(index for index in range(3) if index not in (forward_index, up_index))
+    return size[[forward_index, side_index, up_index]].copy()
+
+
+def _yaw_from_matched_rotation(matched_rot: np.ndarray) -> float:
+    forward = np.asarray(matched_rot, dtype=np.float64).reshape(3, 3)[:, 0]
+    horizontal_norm = float(np.linalg.norm(forward[:2]))
+    if horizontal_norm < 1e-9:
+        raise ValueError("Selected box forward axis is vertical; a grounded yaw frame is undefined")
+    return float(np.arctan2(forward[1], forward[0]))
+
+
+def _yaw_quat_wxyz(yaw: float) -> np.ndarray:
+    half_yaw = 0.5 * float(yaw)
+    return np.array([np.cos(half_yaw), 0.0, 0.0, np.sin(half_yaw)], dtype=np.float64)
+
+
+@dataclass(frozen=True)
+class BoxGraspRetargetResult:
+    """Diagnostics and qpos produced by :func:`retarget_qpos_for_box_grasp`."""
+
+    qpos: np.ndarray
+    hand_targets: np.ndarray
+    hand_positions: np.ndarray
+    foot_targets: np.ndarray
+    foot_positions: np.ndarray
+    hand_residual_m: float
+    foot_residual_m: float
+    source_forward_axis: str
+    source_up_axis: str
+    target_forward_axis: str
+    target_up_axis: str
+    source_matched_size: np.ndarray
+    target_matched_size: np.ndarray
+    root_corner_code: np.ndarray
+    yaw_delta_rad: float
 
 
 def infer_source_box_from_ee(ee_world: np.ndarray, dst_box: BoxFrame) -> BoxFrame:
@@ -358,6 +494,229 @@ def solve_multi_ee_ik(
     return q, float(np.linalg.norm(np.concatenate(residual, axis=0)))
 
 
+def retarget_qpos_for_box_grasp(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    *,
+    qpos: np.ndarray,
+    source_box: BoxFrame,
+    target_box: BoxFrame,
+    hand_body_ids: Sequence[int],
+    foot_body_ids: Sequence[int],
+    source_forward_axis: str,
+    source_up_axis: str,
+    target_forward_axis: str,
+    target_up_axis: str,
+    ik_max_iters: int = 80,
+    ik_pos_tol: float = 1e-4,
+    fixed_foot_weight: float = 6.0,
+    max_foot_residual_m: float = 1e-3,
+) -> BoxGraspRetargetResult:
+    """Retarget a two-hand box grasp while preserving grounded foot poses.
+
+    The selected physical forward/up axes first define canonical semantic box
+    frames.  Their dimensions are reordered into ``[forward, side, up]`` and
+    their forward directions are projected to yaw-only frames before mapping
+    the robot root and normalized hand coordinates.  This keeps the robot
+    upright even when the source mesh frame has roll or pitch.  Both feet are
+    constrained in XYZ during IK; base Z remains active so the leg chain may
+    compensate without moving the contacts through the floor.
+    """
+    q0 = np.asarray(qpos, dtype=np.float64).reshape(-1).copy()
+    if q0.shape != (model.nq,):
+        raise ValueError(f"Expected qpos shape ({model.nq},), got {q0.shape}")
+    if not np.all(np.isfinite(q0)):
+        raise ValueError("qpos must contain only finite values")
+    if float(np.linalg.norm(q0[3:7])) < 1e-12:
+        raise ValueError("Floating-base qpos contains a zero root quaternion")
+    first_joint_is_root_free = (
+        model.njnt > 0
+        and int(model.jnt_type[0]) == int(mujoco.mjtJoint.mjJNT_FREE)
+        and int(model.jnt_qposadr[0]) == 0
+        and int(model.jnt_dofadr[0]) == 0
+    )
+    if model.nq < 7 or not first_joint_is_root_free:
+        raise ValueError(
+            "Box-grasp retargeting requires a root free joint at qpos/dof index 0"
+        )
+    if ik_max_iters <= 0:
+        raise ValueError("ik_max_iters must be positive")
+    if ik_pos_tol <= 0.0 or max_foot_residual_m <= 0.0:
+        raise ValueError("IK and foot tolerances must be positive")
+    if fixed_foot_weight <= 0.0:
+        raise ValueError("fixed_foot_weight must be positive")
+
+    hand_ids = [int(body_id) for body_id in hand_body_ids]
+    foot_ids = [int(body_id) for body_id in foot_body_ids]
+    if len(hand_ids) != 2:
+        raise ValueError(f"Expected exactly two hand body IDs, got {len(hand_ids)}")
+    if len(foot_ids) != 2:
+        raise ValueError(f"Expected exactly two foot body IDs, got {len(foot_ids)}")
+    if len(set(hand_ids)) != 2 or len(set(foot_ids)) != 2:
+        raise ValueError("Hand and foot body IDs must each be distinct")
+    if set(hand_ids) & set(foot_ids):
+        raise ValueError("Hand and foot body IDs must not overlap")
+    for body_id in hand_ids + foot_ids:
+        if body_id < 0 or body_id >= model.nbody:
+            raise ValueError(f"Invalid MuJoCo body ID {body_id}")
+
+    source_center = np.asarray(source_box.center, dtype=np.float64).reshape(3)
+    target_center = np.asarray(target_box.center, dtype=np.float64).reshape(3)
+    if not np.all(np.isfinite(source_center)) or not np.all(np.isfinite(target_center)):
+        raise ValueError("Source and target box centers must contain only finite values")
+
+    source_forward_axis = normalize_box_axis(source_forward_axis)
+    source_up_axis = normalize_box_axis(source_up_axis)
+    target_forward_axis = normalize_box_axis(target_forward_axis)
+    target_up_axis = normalize_box_axis(target_up_axis)
+
+    source_matched_rot = matched_box_rotation(
+        source_box.quat_wxyz,
+        source_forward_axis,
+        source_up_axis,
+    )
+    target_matched_rot = matched_box_rotation(
+        target_box.quat_wxyz,
+        target_forward_axis,
+        target_up_axis,
+    )
+    source_matched_size = box_size_in_matched_frame(
+        source_box.size,
+        source_forward_axis,
+        source_up_axis,
+    )
+    target_matched_size = box_size_in_matched_frame(
+        target_box.size,
+        target_forward_axis,
+        target_up_axis,
+    )
+
+    source_yaw = _yaw_from_matched_rotation(source_matched_rot)
+    target_yaw = _yaw_from_matched_rotation(target_matched_rot)
+    yaw_delta = float(np.arctan2(np.sin(target_yaw - source_yaw), np.cos(target_yaw - source_yaw)))
+    source_ground_box = BoxFrame(
+        center=source_center.copy(),
+        size=source_matched_size,
+        quat_wxyz=_yaw_quat_wxyz(source_yaw),
+    )
+    target_ground_box = BoxFrame(
+        center=target_center.copy(),
+        size=target_matched_size,
+        quat_wxyz=_yaw_quat_wxyz(target_yaw),
+    )
+
+    data.qpos[:] = q0
+    mujoco.mj_forward(model, data)
+    hand_positions_before = np.vstack([_get_body_pos(data, body_id) for body_id in hand_ids])
+    foot_positions_before = np.vstack([_get_body_pos(data, body_id) for body_id in foot_ids])
+    hand_targets = infer_scaled_targets(
+        source_ground_box,
+        target_ground_box,
+        hand_positions_before,
+    )
+
+    # Retargeted payloads may be passed through the shared path again.  Keep an
+    # exact no-op when their grounded semantic box geometry already matches;
+    # rerunning numerical IK would otherwise introduce small joint drift.
+    same_ground_geometry = (
+        np.allclose(source_ground_box.center, target_ground_box.center, rtol=0.0, atol=1e-12)
+        and np.allclose(source_ground_box.size, target_ground_box.size, rtol=0.0, atol=1e-12)
+        and abs(yaw_delta) <= 1e-12
+    )
+    if same_ground_geometry:
+        _, root_corner_code = map_points_by_closest_box_corner(
+            source_ground_box,
+            target_ground_box,
+            q0[0:3],
+        )
+        return BoxGraspRetargetResult(
+            qpos=q0.copy(),
+            hand_targets=hand_positions_before.copy(),
+            hand_positions=hand_positions_before.copy(),
+            foot_targets=foot_positions_before.copy(),
+            foot_positions=foot_positions_before.copy(),
+            hand_residual_m=0.0,
+            foot_residual_m=0.0,
+            source_forward_axis=source_forward_axis,
+            source_up_axis=source_up_axis,
+            target_forward_axis=target_forward_axis,
+            target_up_axis=target_up_axis,
+            source_matched_size=source_matched_size.copy(),
+            target_matched_size=target_matched_size.copy(),
+            root_corner_code=np.asarray(root_corner_code, dtype=np.float64).copy(),
+            yaw_delta_rad=yaw_delta,
+        )
+
+    q_init = q0.copy()
+    mapped_root, root_corner_code = map_points_by_closest_box_corner(
+        source_ground_box,
+        target_ground_box,
+        q0[0:3],
+    )
+    q_init[0:2] = mapped_root[0:2]
+    q_init[2] = q0[2]
+    q_init[3:7] = _quat_wxyz_normalize(
+        _quat_wxyz_multiply(_yaw_quat_wxyz(yaw_delta), q0[3:7])
+    )
+
+    # Capture the rigidly mapped support contacts before enabling base Z.  The
+    # solver may then redistribute height through the legs, but the feet remain
+    # at these grounded XYZ positions.
+    data.qpos[:] = q_init
+    mujoco.mj_forward(model, data)
+    foot_targets = np.vstack([_get_body_pos(data, body_id) for body_id in foot_ids])
+    foot_mask = np.ones((len(foot_ids), 3), dtype=np.float64)
+
+    q_new, _ = solve_multi_ee_ik(
+        model,
+        data,
+        q_init=q_init,
+        body_ids=hand_ids,
+        target_positions=hand_targets,
+        fixed_body_ids=foot_ids,
+        fixed_body_targets=foot_targets,
+        fixed_body_mask=foot_mask,
+        fixed_body_weight=fixed_foot_weight,
+        active_base_dofs=(2,),
+        max_iters=ik_max_iters,
+        pos_tol=ik_pos_tol,
+        # The generic solver's stronger posture regularization can leave
+        # centimetres of grasp error on carried-box poses. Feet and joint
+        # limits already constrain this solve; use only a light tie-breaker.
+        regularization=1e-6,
+    )
+
+    data.qpos[:] = q_new
+    mujoco.mj_forward(model, data)
+    hand_positions = np.vstack([_get_body_pos(data, body_id) for body_id in hand_ids])
+    foot_positions = np.vstack([_get_body_pos(data, body_id) for body_id in foot_ids])
+    hand_residual_m = float(np.linalg.norm(hand_targets - hand_positions))
+    foot_residual_m = float(np.linalg.norm(foot_targets - foot_positions))
+    if not np.isfinite(foot_residual_m) or foot_residual_m > max_foot_residual_m:
+        raise RuntimeError(
+            f"Grounded-foot IK residual {foot_residual_m:.6f} m exceeds "
+            f"limit {max_foot_residual_m:.6f} m"
+        )
+
+    return BoxGraspRetargetResult(
+        qpos=q_new.copy(),
+        hand_targets=hand_targets.copy(),
+        hand_positions=hand_positions.copy(),
+        foot_targets=foot_targets.copy(),
+        foot_positions=foot_positions.copy(),
+        hand_residual_m=hand_residual_m,
+        foot_residual_m=foot_residual_m,
+        source_forward_axis=source_forward_axis,
+        source_up_axis=source_up_axis,
+        target_forward_axis=target_forward_axis,
+        target_up_axis=target_up_axis,
+        source_matched_size=source_matched_size.copy(),
+        target_matched_size=target_matched_size.copy(),
+        root_corner_code=np.asarray(root_corner_code, dtype=np.float64).copy(),
+        yaw_delta_rad=yaw_delta,
+    )
+
+
 def _candidate_model_roots() -> list[Path]:
     roots = [Path(__file__).resolve().parents[1]]
 
@@ -586,43 +945,7 @@ def process_file(
         "dst_box_center_used": dst_box_used.center.copy(),
         "dst_box_quat_used": dst_box_used.quat_wxyz.copy(),
     }
-def infer_scaled_targets_with_corner_surface_alignment(
-    src_box: BoxFrame,
-    dst_box: BoxFrame,
-    ee_world: np.ndarray,
-    robot_root: np.ndarray,
-) -> np.ndarray:
-    """Scale EE targets, then slide on the current target-box surface to match source corner-relative direction/distance."""
-    if ee_world.size == 0:
-        return ee_world.copy(), ee_world.copy()
 
-    scaled_world = infer_scaled_targets(src_box, dst_box, ee_world)
-    scaled_local = dst_box.world_to_local(scaled_world)
-    half = np.maximum(dst_box.half_extents, 1e-9)
-
-    corner_codes = _closest_corner_codes_for_ees(src_box, ee_world, robot_root)
-    out_local = scaled_local.copy()
-    for i in range(ee_world.shape[0]):
-        code = corner_codes[i]
-        src_corner = _corner_world_from_code(src_box, code)
-        dst_corner = _corner_world_from_code(dst_box, code)
-
-        # Desired corner-relative vector from source, transplanted to target corner.
-        desired_world = dst_corner + (ee_world[i] - src_corner)
-        desired_local = dst_box.world_to_local(desired_world[None, :])[0]
-
-        # Keep the EE on the same surface (face) as the initially scaled target.
-        norm = np.abs(out_local[i]) / half
-        face_axis = int(np.argmax(norm))
-        face_val = np.sign(out_local[i, face_axis]) * half[face_axis]
-        if abs(face_val) < 1e-12:
-            face_val = half[face_axis]
-
-        local = np.clip(desired_local, -half, half)
-        local[face_axis] = face_val
-        out_local[i] = local
-    projected_world = dst_box.local_to_world(out_local)
-    return projected_world
 
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -645,13 +968,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--src-box-quat-wxyz",
         type=lambda s: np.asarray([float(x) for x in s.split(",")], dtype=np.float64),
-        default=np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64),
+        default=np.asarray(DEFAULT_TARGET_BOX_QUAT_WXYZ, dtype=np.float64),
         help="Source box orientation quaternion w,x,y,z (default identity).",
     )
     p.add_argument(
         "--dst-box-quat-wxyz",
         type=lambda s: np.asarray([float(x) for x in s.split(",")], dtype=np.float64),
-        default=np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64),
+        default=np.asarray(DEFAULT_TARGET_BOX_QUAT_WXYZ, dtype=np.float64),
         help="Target box orientation quaternion w,x,y,z (default identity).",
     )
     p.add_argument("--debug", action="store_true", help="Print detailed per-file diagnostics.")
