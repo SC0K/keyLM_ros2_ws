@@ -13,11 +13,15 @@ from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.node import Node
 
 from lm.box_config import (
+    DEFAULT_TARGET_BOX_ORIENTATION_OFFSET_RPY_DEG,
     DEFAULT_TARGET_BOX_QUAT_WXYZ,
     REAL_TARGET_BOX_GEOMETRY,
     SOURCE_BOX_GEOMETRY,
+    format_orientation_offset_rpy_deg,
+    parse_orientation_offset_rpy_deg,
     parse_box_size_xyz,
 )
+from lm.box_orientation import apply_target_box_orientation_offset
 from lm_interfaces.srv import RetargetKeyframe
 
 from lm.keyframe_box_retarget import (
@@ -28,6 +32,7 @@ from lm.keyframe_box_retarget import (
     _pick_existing_default_feet,
     retarget_qpos_for_box_grasp,
 )
+from lm.keyframe_modes import MANIPULATION_KEYFRAMES
 
 _AXIS_TO_LOCAL_VEC = {
     "x": np.array([1.0, 0.0, 0.0], dtype=np.float64),
@@ -38,8 +43,8 @@ _AXIS_TO_LOCAL_VEC = {
     "-z": np.array([0.0, 0.0, -1.0], dtype=np.float64),
 }
 
-_OBJECT_REQUIRED_KEYFRAMES = frozenset({"stand_before_place"})
 _PICK_POSE_KEYFRAMES = frozenset({"stand_before_pick", "crouch_to_pick", "stand_after_pick"})
+
 
 def _quat_wxyz_multiply(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
     w1, x1, y1, z1 = q1
@@ -238,6 +243,12 @@ class KeyframeRetargeterNode(Node):
         )
         self.declare_parameter("source_box_up_axis", SOURCE_BOX_GEOMETRY.up_axis)
         self.declare_parameter("box_hold_up_axis", REAL_TARGET_BOX_GEOMETRY.up_axis)
+        self.declare_parameter(
+            "target_box_orientation_offset_rpy_deg",
+            format_orientation_offset_rpy_deg(
+                DEFAULT_TARGET_BOX_ORIENTATION_OFFSET_RPY_DEG
+            ),
+        )
         self.declare_parameter("stand_before_pick_offset_m", 0.2)
         self.declare_parameter("stand_after_pick_height_m", 0.9)
         self.declare_parameter("stand_before_place_height_m", 0.9)
@@ -267,6 +278,13 @@ class KeyframeRetargeterNode(Node):
         )
         self._box_hold_up_axis = _normalize_axis_label(
             str(self.get_parameter("box_hold_up_axis").value)
+        )
+        self._target_box_orientation_offset_rpy_deg = (
+            parse_orientation_offset_rpy_deg(
+                self.get_parameter(
+                    "target_box_orientation_offset_rpy_deg"
+                ).value
+            )
         )
         self._stand_before_pick_offset_m = float(self.get_parameter("stand_before_pick_offset_m").value)
         self._stand_after_pick_height_m = float(self.get_parameter("stand_after_pick_height_m").value)
@@ -341,7 +359,8 @@ class KeyframeRetargeterNode(Node):
         self.get_logger().info(
             "Retargeter service ready. service=%s. keyframes=%s. "
             "source_box_size=%s. target_box_size=%s. "
-            "source_axes=%s/%s. target_axes=%s/%s"
+            "source_axes=%s/%s. target_axes=%s/%s. "
+            "policy_object_orientation_offset_rpy_deg=%s"
             % (
                 retarget_keyframe_service,
                 self._library_dir,
@@ -351,6 +370,10 @@ class KeyframeRetargeterNode(Node):
                 self._source_box_up_axis,
                 self._box_hold_forward_axis,
                 self._box_hold_up_axis,
+                np.array2string(
+                    self._target_box_orientation_offset_rpy_deg,
+                    precision=3,
+                ),
             )
         )
 
@@ -377,11 +400,10 @@ class KeyframeRetargeterNode(Node):
     def _process_keyframe(self, keyframe_name: str, object_to_manipulate: bool | None = None) -> tuple[bytes, str]:
         if object_to_manipulate is not None:
             self._object_to_manipulate = bool(object_to_manipulate)
-        if keyframe_name in _OBJECT_REQUIRED_KEYFRAMES:
+        if keyframe_name in MANIPULATION_KEYFRAMES:
             self._object_to_manipulate = True
         payload = self._load_payload(keyframe_name)
         if keyframe_name == "stand_after_place":
-            self._object_to_manipulate = False
             mode = self._retarget_stand_after_place(payload)
         elif self._object_to_manipulate:
             mode = self._retarget_for_box_task(keyframe_name, payload)
@@ -433,35 +455,53 @@ class KeyframeRetargeterNode(Node):
             request_target_box_center, request_target_box_quat_wxyz = _pose_to_arrays(request.target_box_pose)
             self._target_root_center, self._target_root_quat_wxyz = _pose_to_arrays(request.target_root_pose)
 
-            if self._fixed_start_box_center is None or self._fixed_start_box_quat_wxyz is None:
+            if (
+                self._fixed_start_box_center is None
+                or self._fixed_start_box_quat_wxyz is None
+            ):
                 self._fixed_start_box_center = request_current_box_center.copy()
-                self._fixed_start_box_quat_wxyz = request_current_box_quat_wxyz.copy()
+                self._fixed_start_box_quat_wxyz = (
+                    request_current_box_quat_wxyz.copy()
+                )
                 self.get_logger().info(
                     "Latched fixed start box pose: position=%s quat=%s"
                     % (
                         np.array2string(self._fixed_start_box_center, precision=3),
-                        np.array2string(self._fixed_start_box_quat_wxyz, precision=3),
+                        np.array2string(
+                            self._fixed_start_box_quat_wxyz, precision=3
+                        ),
                     )
                 )
-            if self._fixed_target_box_center is None or self._fixed_target_box_quat_wxyz is None:
+            if (
+                self._fixed_target_box_center is None
+                or self._fixed_target_box_quat_wxyz is None
+            ):
                 self._fixed_target_box_center = request_target_box_center.copy()
-                self._fixed_target_box_quat_wxyz = request_target_box_quat_wxyz.copy()
+                self._fixed_target_box_quat_wxyz = (
+                    request_target_box_quat_wxyz.copy()
+                )
                 self.get_logger().info(
                     "Latched fixed target box pose: position=%s quat=%s"
                     % (
                         np.array2string(self._fixed_target_box_center, precision=3),
-                        np.array2string(self._fixed_target_box_quat_wxyz, precision=3),
+                        np.array2string(
+                            self._fixed_target_box_quat_wxyz, precision=3
+                        ),
                     )
                 )
 
             if keyframe_name in _PICK_POSE_KEYFRAMES:
                 self._current_box_center = self._fixed_start_box_center.copy()
-                self._current_box_quat_wxyz = self._fixed_start_box_quat_wxyz.copy()
+                self._current_box_quat_wxyz = (
+                    self._fixed_start_box_quat_wxyz.copy()
+                )
             else:
                 self._current_box_center = request_current_box_center
                 self._current_box_quat_wxyz = request_current_box_quat_wxyz
             self._target_box_center = self._fixed_target_box_center.copy()
-            self._target_box_quat_wxyz = self._fixed_target_box_quat_wxyz.copy()
+            self._target_box_quat_wxyz = (
+                self._fixed_target_box_quat_wxyz.copy()
+            )
             self._has_current_box_pose = True
             requested_forward_axis = _normalize_axis_label(request.box_forward_axis)
             if self._fixed_box_hold_forward_axis is None:
@@ -739,6 +779,19 @@ class KeyframeRetargeterNode(Node):
         payload["object_quat_frame"] = np.asarray("physical_box")
         payload.pop("object_mesh_offset_removed_rpy_deg", None)
 
+    def _write_policy_object_pose(
+        self,
+        payload: dict[str, np.ndarray],
+        center: np.ndarray,
+        physical_quat_wxyz: np.ndarray,
+    ) -> None:
+        """Write the object goal after IK, with the policy-only correction."""
+        policy_quat_wxyz = apply_target_box_orientation_offset(
+            physical_quat_wxyz,
+            self._target_box_orientation_offset_rpy_deg,
+        )
+        self._write_physical_object_pose(payload, center, policy_quat_wxyz)
+
     @staticmethod
     def _serialize_payload(payload: dict[str, np.ndarray]) -> bytes:
         buf = BytesIO()
@@ -747,8 +800,12 @@ class KeyframeRetargeterNode(Node):
 
     def _retarget_for_box_task(self, keyframe_name: str, payload: dict[str, np.ndarray]) -> str:
         if keyframe_name == "crouch_to_pick":
-            self._apply_box_ik(payload, self._current_box_center, self._current_box_quat_wxyz)
-            self._write_physical_object_pose(
+            self._apply_box_ik(
+                payload,
+                self._current_box_center,
+                self._current_box_quat_wxyz,
+            )
+            self._write_policy_object_pose(
                 payload,
                 self._current_box_center,
                 self._current_box_quat_wxyz,
@@ -758,8 +815,12 @@ class KeyframeRetargeterNode(Node):
         if keyframe_name == "stand_after_pick":
             lifted_box_center = self._current_box_center.copy()
             lifted_box_center[2] = self._stand_after_pick_height_m
-            self._apply_box_ik(payload, lifted_box_center, self._current_box_quat_wxyz)
-            self._write_physical_object_pose(
+            self._apply_box_ik(
+                payload,
+                lifted_box_center,
+                self._current_box_quat_wxyz,
+            )
+            self._write_policy_object_pose(
                 payload,
                 lifted_box_center,
                 self._current_box_quat_wxyz,
@@ -767,22 +828,28 @@ class KeyframeRetargeterNode(Node):
             return "ik_to_lifted_box_stand_after_pick"
 
         if keyframe_name == "stand_before_pick":
-            self._apply_root_pose(payload, self._target_root_center, self._target_root_quat_wxyz)
-
+            self._apply_root_pose(
+                payload,
+                self._target_root_center,
+                self._target_root_quat_wxyz,
+            )
             if self._has_current_box_pose:
-                self._write_physical_object_pose(
+                self._write_policy_object_pose(
                     payload,
                     self._current_box_center,
                     self._current_box_quat_wxyz,
                 )
-
             return "stand_before_pick_root_from_vlm"
 
         if keyframe_name == "stand_before_place":
             above_target = self._target_box_center.copy()
             above_target[2] = self._stand_before_place_height_m
-            self._apply_box_ik(payload, above_target, self._target_box_quat_wxyz)
-            self._write_physical_object_pose(
+            self._apply_box_ik(
+                payload,
+                above_target,
+                self._target_box_quat_wxyz,
+            )
+            self._write_policy_object_pose(
                 payload,
                 above_target,
                 self._target_box_quat_wxyz,
@@ -792,8 +859,12 @@ class KeyframeRetargeterNode(Node):
         if keyframe_name == "crouch_to_place":
             place_target = self._target_box_center.copy()
             place_target[2] = 0.5 * self._box_size_xyz[2]
-            self._apply_box_ik(payload, place_target, self._target_box_quat_wxyz)
-            self._write_physical_object_pose(
+            self._apply_box_ik(
+                payload,
+                place_target,
+                self._target_box_quat_wxyz,
+            )
+            self._write_policy_object_pose(
                 payload,
                 place_target,
                 self._target_box_quat_wxyz,
@@ -817,15 +888,29 @@ class KeyframeRetargeterNode(Node):
                 payload[key] = np.zeros_like(payload[key])
         payload.pop("object_mesh_offset_removed_rpy_deg", None)
 
-    def _retarget_stand_after_place(self, payload: dict[str, np.ndarray]) -> str:
-        self._apply_root_pose(payload, self._target_root_center, self._target_root_quat_wxyz)
-        self._zero_object_targets(payload)
-        return "stand_after_place_current_root"
+    def _retarget_stand_after_place(
+        self,
+        payload: dict[str, np.ndarray],
+    ) -> str:
+        self._apply_root_pose(
+            payload,
+            self._target_root_center,
+            self._target_root_quat_wxyz,
+        )
+        placed_box_center = self._target_box_center.copy()
+        placed_box_center[2] = 0.5 * self._box_size_xyz[2]
+        self._write_policy_object_pose(
+            payload,
+            placed_box_center,
+            self._target_box_quat_wxyz,
+        )
+        return "stand_after_place_current_root_with_object"
 
     def _retarget_root_only(self, payload: dict[str, np.ndarray]) -> str:
         self._apply_root_pose(payload, self._target_root_center, self._target_root_quat_wxyz)
         self._zero_object_targets(payload)
         return "root_only_retarget"
+
 
 def main(args: list[str] | None = None) -> None:
     rclpy.init(args=args)

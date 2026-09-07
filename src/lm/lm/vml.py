@@ -15,14 +15,11 @@ from rclpy.node import Node
 from std_msgs.msg import String, UInt8MultiArray
 
 from lm.box_config import (
-    DEFAULT_TARGET_BOX_ORIENTATION_OFFSET_RPY_DEG,
     DEFAULT_TARGET_BOX_QUAT_WXYZ,
     REAL_TARGET_BOX_GEOMETRY,
-    format_orientation_offset_rpy_deg,
     parse_box_size_xyz,
-    parse_orientation_offset_rpy_deg,
 )
-from lm.box_orientation import apply_target_box_orientation_offset
+from lm.keyframe_modes import MANIPULATION_KEYFRAMES
 from lm_interfaces.srv import RetargetKeyframe, VLMQuery
 
 
@@ -35,10 +32,10 @@ _AXIS_TO_LOCAL_VEC = {
     "-z": np.array([0.0, 0.0, -1.0], dtype=np.float64),
 }
 
-_OBJECT_REQUIRED_KEYFRAMES = frozenset({"stand_before_place"})
 _GLOBAL_X_WORLD = np.array([1.0, 0.0, 0.0], dtype=np.float64)
 _GLOBAL_X_YAW_QUAT_WXYZ = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
 _PICK_POSE_KEYFRAMES = frozenset({"stand_before_pick", "crouch_to_pick", "stand_after_pick"})
+
 
 def _quat_wxyz_to_rotmat(q: np.ndarray) -> np.ndarray:
     q = np.asarray(q, dtype=np.float64)
@@ -173,12 +170,6 @@ class VLMClientNode(Node):
             list(DEFAULT_TARGET_BOX_QUAT_WXYZ),
         )
         self.declare_parameter(
-            "target_box_orientation_offset_rpy_deg",
-            format_orientation_offset_rpy_deg(
-                DEFAULT_TARGET_BOX_ORIENTATION_OFFSET_RPY_DEG
-            ),
-        )
-        self.declare_parameter(
             "default_box_forward_axis",
             REAL_TARGET_BOX_GEOMETRY.forward_axis,
         )
@@ -258,13 +249,6 @@ class VLMClientNode(Node):
         )
         self._default_target_box_quat_wxyz = np.asarray(
             self.get_parameter("default_target_box_quat_wxyz").value, dtype=np.float64
-        )
-        self._target_box_orientation_offset_rpy_deg = (
-            parse_orientation_offset_rpy_deg(
-                self.get_parameter(
-                    "target_box_orientation_offset_rpy_deg"
-                ).value
-            )
         )
         self.box_forward_axis = _normalize_axis_label(self.get_parameter("default_box_forward_axis").value)
         self._box_forward_axis_initialized_from_robot = False
@@ -350,7 +334,10 @@ class VLMClientNode(Node):
 
     @staticmethod
     def _effective_object_to_manipulate(response: VLMQuery.Response) -> bool:
-        return bool(response.object_in_manipulation) or response.next_keyframe in _OBJECT_REQUIRED_KEYFRAMES
+        return (
+            bool(response.object_in_manipulation)
+            or response.next_keyframe in MANIPULATION_KEYFRAMES
+        )
 
     def send_request(
         self,
@@ -722,7 +709,7 @@ class VLMClientNode(Node):
             target = start_center.copy()
             target[2] = self._stand_after_pick_height_m
             return target, start_quat
-        if action in ("stand_before_place",):
+        if action == "stand_before_place":
             target = np.asarray(place_target_center, dtype=np.float64).copy()
             target[2] = self._stand_before_place_height_m
             return target, np.asarray(place_target_quat, dtype=np.float64).copy()
@@ -772,21 +759,16 @@ class VLMClientNode(Node):
         nominal_target_quat = _normalize_quat_wxyz(
             self._default_target_box_quat_wxyz.copy()
         )
-        self._task_target_box_quat_wxyz = apply_target_box_orientation_offset(
-            nominal_target_quat,
-            self._target_box_orientation_offset_rpy_deg,
-        )
+        # This is the physical placement orientation used by geometric
+        # retargeting and task-success checks.  Any policy-only correction is
+        # applied by the retargeter after IK when it writes the object goal.
+        self._task_target_box_quat_wxyz = nominal_target_quat
         self._task_target_initialized_time = time.monotonic()
         self.get_logger().info(
-            "Initialized fixed task target box pose: position=%s quat=%s "
-            "local_orientation_offset_rpy_deg=%s"
+            "Initialized fixed physical task target box pose: position=%s quat=%s"
             % (
                 np.array2string(self._task_target_box_center, precision=3),
                 np.array2string(self._task_target_box_quat_wxyz, precision=3),
-                np.array2string(
-                    self._target_box_orientation_offset_rpy_deg,
-                    precision=3,
-                ),
             )
         )
         self.publish_status(
@@ -794,9 +776,6 @@ class VLMClientNode(Node):
             "Initialized fixed task target box pose",
             target_box_position_xyz=self._task_target_box_center.tolist(),
             target_box_quat_wxyz=self._task_target_box_quat_wxyz.tolist(),
-            target_box_orientation_offset_rpy_deg=(
-                self._target_box_orientation_offset_rpy_deg.tolist()
-            ),
             target_direction_world_xyz=_GLOBAL_X_WORLD.tolist(),
             target_source="starting_box_pose_plus_global_x",
             box_forward_axis=self.box_forward_axis,
@@ -947,7 +926,7 @@ class VLMClientNode(Node):
                 "For failed final standby, retry stand_after_place. "
                 "Set task_completion true only when measured_task_completion is true and the selected next keyframe leaves the robot in the final required task state. "
                 "The VLM response field object_in_manipulation is the same effective flag as object_to_manipulate: true means both retargeting and policy should consider the object. "
-                "Set it true for object-aware pick/place frames such as crouch_to_pick, stand_after_pick, stand_before_place, and crouch_to_place. It can be false for pure standing/root/standby frames such as stand_before_pick and final stand_after_place."
+                "Set it true for all six pick-and-place keyframes, including stand_before_pick and final stand_after_place, so every policy goal receives the measured object pose in the robot base frame."
             ),
         }
         return json.dumps(context, indent=2)
@@ -974,13 +953,19 @@ class VLMClientNode(Node):
 
         start_box_center, start_box_quat = self._fixed_start_box_pose()
         retarget_current_box_source = (
-            "fixed_start_box_pose" if response.next_keyframe in _PICK_POSE_KEYFRAMES else "current_box_pose"
+            "fixed_start_box_pose"
+            if response.next_keyframe in _PICK_POSE_KEYFRAMES
+            else "current_box_pose"
         )
         retarget_current_box_center = (
-            start_box_center if response.next_keyframe in _PICK_POSE_KEYFRAMES else self._current_box_center
+            start_box_center
+            if response.next_keyframe in _PICK_POSE_KEYFRAMES
+            else self._current_box_center
         )
         retarget_current_box_quat = (
-            start_box_quat if response.next_keyframe in _PICK_POSE_KEYFRAMES else self._current_box_quat_wxyz
+            start_box_quat
+            if response.next_keyframe in _PICK_POSE_KEYFRAMES
+            else self._current_box_quat_wxyz
         )
         current_box_pose_msg = self._pose_stamped_from(
             center=retarget_current_box_center,
@@ -1023,11 +1008,14 @@ class VLMClientNode(Node):
                     "No current robot root pose available for stand_after_place; using default target root pose."
                 )
 
-        action_object_target_center, action_object_target_quat = self._expected_object_target_for_action(
-            response.next_keyframe,
-            target_box_center,
-            target_box_quat,
+        action_object_target_center, action_object_target_quat = (
+            self._expected_object_target_for_action(
+                response.next_keyframe,
+                target_box_center,
+                target_box_quat,
+            )
         )
+
         target_root_pose_msg = self._pose_stamped_from(
             center=target_root_center,
             quat_wxyz=target_root_quat,

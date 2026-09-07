@@ -1,4 +1,4 @@
-"""Pure quaternion helpers for optional target-box orientation correction."""
+"""Quaternion helpers for optional policy-only object-goal correction."""
 
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ def apply_target_box_orientation_offset(
     target_quat_wxyz: np.ndarray,
     offset_rpy_deg: np.ndarray,
 ) -> np.ndarray:
-    """Post-rotate a target orientation about the retargeted box's local axes.
+    """Post-rotate a policy object goal about the target box's local axes.
 
     The convention is intrinsic XYZ roll/pitch/yaw in degrees:
     ``q_corrected = q_retargeted * q_offset``.

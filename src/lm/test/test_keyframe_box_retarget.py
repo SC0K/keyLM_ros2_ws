@@ -18,6 +18,7 @@ from lm.keyframe_box_retarget import (
     _quat_wxyz_normalize,
     _quat_wxyz_to_rotmat,
     box_size_in_matched_frame,
+    infer_scaled_targets,
     map_points_by_closest_box_corner,
     matched_box_rotation,
     retarget_qpos_for_box_grasp,
@@ -97,6 +98,54 @@ def test_matched_frame_respects_axis_semantics_and_reorders_dimensions() -> None
         box_size_in_matched_frame(SIM_TARGET_BOX_GEOMETRY.size_xyz, "-y", "z"),
         np.asarray(SIM_TARGET_BOX_GEOMETRY.size_xyz)[[1, 0, 2]],
         atol=0.0,
+    )
+
+
+def test_scaled_hand_targets_preserve_normalized_box_coordinates() -> None:
+    """Hand targets follow unequal box dimensions in the matched box frame."""
+    source_yaw = np.deg2rad(31.0)
+    target_yaw = np.deg2rad(-47.0)
+    source_box = BoxFrame(
+        center=np.array([0.4, -0.2, 0.3], dtype=np.float64),
+        size=np.array([0.35, 0.25, 0.30], dtype=np.float64),
+        quat_wxyz=np.array(
+            [np.cos(source_yaw / 2.0), 0.0, 0.0, np.sin(source_yaw / 2.0)],
+            dtype=np.float64,
+        ),
+    )
+    target_box = BoxFrame(
+        center=np.array([-0.1, 0.7, 0.5], dtype=np.float64),
+        size=np.array([0.60, 0.10, 0.45], dtype=np.float64),
+        quat_wxyz=np.array(
+            [np.cos(target_yaw / 2.0), 0.0, 0.0, np.sin(target_yaw / 2.0)],
+            dtype=np.float64,
+        ),
+    )
+    source_local = np.array(
+        [[0.12, 0.18, -0.04], [-0.09, -0.16, 0.07]],
+        dtype=np.float64,
+    )
+    source_hands = source_box.local_to_world(source_local)
+
+    target_hands = infer_scaled_targets(source_box, target_box, source_hands)
+
+    np.testing.assert_allclose(
+        target_box.world_to_local(target_hands) / target_box.half_extents,
+        source_box.world_to_local(source_hands) / source_box.half_extents,
+        atol=1e-12,
+    )
+
+    resized_target = BoxFrame(
+        center=target_box.center,
+        size=np.array([0.15, 0.80, 0.20], dtype=np.float64),
+        quat_wxyz=target_box.quat_wxyz,
+    )
+    resized_hands = infer_scaled_targets(source_box, resized_target, source_hands)
+    assert not np.allclose(resized_hands, target_hands)
+    np.testing.assert_allclose(
+        resized_target.world_to_local(resized_hands) / resized_target.half_extents,
+        source_box.world_to_local(source_hands) / source_box.half_extents,
+        atol=1e-12,
     )
 
 
@@ -188,6 +237,60 @@ def test_pickup_retarget_keeps_both_feet_grounded(target_geometry) -> None:
     np.testing.assert_array_equal(no_op.qpos, qpos)
     np.testing.assert_array_equal(no_op.hand_targets, source_hand_positions)
     np.testing.assert_array_equal(no_op.foot_targets, source_foot_positions)
+
+    resized_only_box = BoxFrame(
+        center=source_box.center,
+        size=np.asarray(source_box.size) * np.array([0.95, 1.05, 1.0]),
+        quat_wxyz=source_box.quat_wxyz,
+    )
+    resized_only = retarget_qpos_for_box_grasp(
+        model,
+        data,
+        qpos=qpos,
+        source_box=source_box,
+        target_box=resized_only_box,
+        hand_body_ids=hand_ids,
+        foot_body_ids=foot_ids,
+        source_forward_axis=SOURCE_BOX_GEOMETRY.forward_axis,
+        source_up_axis=SOURCE_BOX_GEOMETRY.up_axis,
+        target_forward_axis=SOURCE_BOX_GEOMETRY.forward_axis,
+        target_up_axis=SOURCE_BOX_GEOMETRY.up_axis,
+    )
+    semantic_rotation = matched_box_rotation(
+        source_box.quat_wxyz,
+        SOURCE_BOX_GEOMETRY.forward_axis,
+        SOURCE_BOX_GEOMETRY.up_axis,
+    )
+    semantic_yaw = np.arctan2(semantic_rotation[1, 0], semantic_rotation[0, 0])
+    semantic_quat = np.array(
+        [np.cos(semantic_yaw / 2.0), 0.0, 0.0, np.sin(semantic_yaw / 2.0)]
+    )
+    source_resize_frame = BoxFrame(
+        center=source_box.center,
+        size=resized_only.source_matched_size,
+        quat_wxyz=semantic_quat,
+    )
+    target_resize_frame = BoxFrame(
+        center=resized_only_box.center,
+        size=resized_only.target_matched_size,
+        quat_wxyz=semantic_quat,
+    )
+    source_normalized = (
+        source_resize_frame.world_to_local(source_hand_positions)
+        / source_resize_frame.half_extents
+    )
+    target_normalized = (
+        target_resize_frame.world_to_local(resized_only.hand_targets)
+        / target_resize_frame.half_extents
+    )
+    np.testing.assert_allclose(target_normalized, source_normalized, atol=1e-12)
+    assert not np.array_equal(resized_only.hand_targets, source_hand_positions)
+    resized_root, _ = map_points_by_closest_box_corner(
+        source_resize_frame,
+        target_resize_frame,
+        qpos[0:3],
+    )
+    np.testing.assert_allclose(resized_only.qpos[0:2], resized_root[0:2], atol=1e-12)
 
     result = retarget_qpos_for_box_grasp(
         model,

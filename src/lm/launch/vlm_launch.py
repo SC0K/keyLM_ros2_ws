@@ -149,8 +149,9 @@ def generate_launch_description() -> LaunchDescription:
                     DEFAULT_TARGET_BOX_ORIENTATION_OFFSET_RPY_DEG
                 ),
                 description=(
-                    "Optional local-frame XYZ roll/pitch/yaw correction in degrees, "
-                    "post-multiplied onto the retargeted target-box orientation."
+                    "Optional local-frame XYZ roll/pitch/yaw correction applied only "
+                    "to the object goal after robot IK; it does not alter root, hand, "
+                    "or joint keyframes."
                 ),
             ),
             DeclareLaunchArgument("stand_after_pick_height_m", default_value="0.8"),
@@ -218,6 +219,9 @@ def generate_launch_description() -> LaunchDescription:
                         "source_box_up_axis": source_box_up_axis,
                         "box_hold_forward_axis": box_hold_forward_axis,
                         "box_hold_up_axis": box_hold_up_axis,
+                        "target_box_orientation_offset_rpy_deg": (
+                            target_box_orientation_offset_rpy_deg
+                        ),
                         "stand_after_pick_height_m": stand_after_pick_height_m,
                         "stand_before_place_height_m": stand_before_place_height_m,
                         "ik_max_residual_m": ParameterValue(
@@ -257,9 +261,6 @@ def generate_launch_description() -> LaunchDescription:
                                 "tracking_error_topic": tracking_error_topic,
                                 "box_size_xyz": box_size_xyz,
                                 "default_box_forward_axis": box_hold_forward_axis,
-                                "target_box_orientation_offset_rpy_deg": (
-                                    target_box_orientation_offset_rpy_deg
-                                ),
                                 "stand_after_pick_height_m": stand_after_pick_height_m,
                                 "stand_before_place_height_m": stand_before_place_height_m,
                                 "retarget_keyframe_service": retarget_keyframe_service,

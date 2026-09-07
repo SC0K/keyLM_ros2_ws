@@ -14,6 +14,7 @@ from sensor_msgs.msg import Image
 from ollama import chat
 from pydantic import BaseModel, ValidationError
 
+from lm.keyframe_modes import MANIPULATION_KEYFRAMES
 from lm_interfaces.srv import VLMQuery
 
 try:
@@ -61,7 +62,7 @@ On failure, choose the safest retry/recovery keyframe from the allowed list: ret
 For failed pick attempts, especially crouch_to_pick or stand_after_pick, recover with stand_before_pick first, then retry crouch_to_pick on the next request.
 For failed place attempts, especially stand_before_place or crouch_to_place, retry the failed place keyframe if the robot is still safely holding the object; otherwise recover with stand_before_place before retrying crouch_to_place.
 For failed final standby, retry stand_after_place.
-At the end of the task, the robot should be in a "stand" keyframe with the object placed at the target location. After placing the object, the robot can only stand up without the object.
+At the end of the task, the robot should be in a "stand" keyframe with the object placed at the target location. After placing the object, the robot stands without holding it, but still uses the measured object pose as a policy observation.
 Your response must follow exactly the JSON schema provided, and only include the allowed keyframes.
 The JSON format is:
 {
@@ -72,10 +73,8 @@ The JSON format is:
 
 Normally after successfully placing the object, choose the final stand keyframe and set task_completion true only if planner_context.measured_task_completion is true and the selected keyframe leaves the robot in the final standby state.
 The object_in_manipulation boolean is the same effective flag as object_to_manipulate. It controls whether the retargeter and policy should consider object target/current-object observations.
-Set object_in_manipulation true for keyframes that need object-aware hand, object target retargeting, or policy object observations: crouch_to_pick, stand_after_pick, stand_before_place, and crouch_to_place.
-stand_before_place is not root-only: set object_in_manipulation true because the robot should still hold the box at the target x/y position with the configured default hold height.
-Set object_in_manipulation false for pure standing/root/standby keyframes that do not need the object mask, especially stand_before_pick and the final stand_after_place after the object has been placed.
-For standing keyframes that still carry or position the object, keep object_in_manipulation true.
+Set object_in_manipulation true for every keyframe in this pick-and-place library: stand_before_pick, crouch_to_pick, stand_after_pick, stand_before_place, crouch_to_place, and stand_after_place.
+The standing setup and final standby keyframes still need the measured object pose in the robot base frame, even when the hands are not holding the object. Never set object_in_manipulation false for one of these six keyframes.
 
 Rules:
 - Return only valid JSON matching the provided schema.
@@ -276,7 +275,10 @@ class VLMServiceNode(Node):
             response.success = True
             response.error_message = ""
             response.next_keyframe = decision.next_keyframe
-            response.object_in_manipulation = decision.object_in_manipulation
+            response.object_in_manipulation = (
+                decision.object_in_manipulation
+                or decision.next_keyframe in MANIPULATION_KEYFRAMES
+            )
             response.task_completion = decision.task_completion
             response.raw_json = raw_json
             response.latency_sec = float(latency_sec)

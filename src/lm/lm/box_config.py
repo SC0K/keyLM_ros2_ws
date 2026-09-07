@@ -86,13 +86,13 @@ REAL_TARGET_BOX_GEOMETRY = BoxGeometry(
     up_axis="z",
 )
 SIM_TARGET_BOX_GEOMETRY = BoxGeometry(
-    size_xyz=(0.30, 0.30, 0.30),
+    size_xyz=(0.35, 0.35, 0.35),
     forward_axis="x",
     up_axis="z",
 )
 DEFAULT_TARGET_BOX_QUAT_WXYZ = (1.0, 0.0, 0.0, 0.0)
-# Optional post-retarget correction.  Keep zero so deployment and sim2sim use
-# authored/observed physical-box orientations unless a launch explicitly opts in.
+# Optional policy-goal correction applied only after robot retargeting. Keep it
+# zero unless the policy's target object orientation needs an explicit offset.
 DEFAULT_TARGET_BOX_ORIENTATION_OFFSET_RPY_DEG = (0.0, 0.0, 0.0)
 
 # Backward-compatible alias for code outside this workspace. New code should

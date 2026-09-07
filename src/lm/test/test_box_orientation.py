@@ -43,7 +43,7 @@ def test_offset_is_postmultiplied_in_target_local_frame() -> None:
     )
 
 
-def test_vlm_latches_the_corrected_target_once() -> None:
+def test_vlm_latches_the_nominal_physical_target_once() -> None:
     pytest.importorskip("rclpy")
     pytest.importorskip("lm_interfaces.srv")
     from lm.vml import VLMClientNode
@@ -61,7 +61,6 @@ def test_vlm_latches_the_corrected_target_once() -> None:
     node._default_target_box_quat_wxyz = quat_wxyz_from_rpy_deg(
         np.array([5.0, 7.0, 11.0])
     )
-    node._target_box_orientation_offset_rpy_deg = np.array([1.0, 2.0, 13.0])
     node._update_box_forward_axis_from_robot_once = lambda: True
     node._default_task_target_box_center = lambda: np.array([1.0, 2.0, 0.15])
     node.get_logger = lambda: _Logger()
@@ -69,13 +68,74 @@ def test_vlm_latches_the_corrected_target_once() -> None:
     node.box_forward_axis = "x"
 
     assert node.initialize_task_target_once()
-    expected = apply_target_box_orientation_offset(
+    np.testing.assert_allclose(
+        node._task_target_box_quat_wxyz,
         node._default_target_box_quat_wxyz,
-        node._target_box_orientation_offset_rpy_deg,
     )
-    np.testing.assert_allclose(node._task_target_box_quat_wxyz, expected)
 
     latched = node._task_target_box_quat_wxyz.copy()
-    node._target_box_orientation_offset_rpy_deg[:] = 90.0
+    node._default_target_box_quat_wxyz = quat_wxyz_from_rpy_deg(
+        np.array([90.0, 90.0, 90.0])
+    )
     assert node.initialize_task_target_once()
     np.testing.assert_array_equal(node._task_target_box_quat_wxyz, latched)
+
+
+def test_vlm_retargeter_applies_offset_only_after_robot_ik() -> None:
+    """The VLM path sends physical orientation to IK and offsets only its goal."""
+    pytest.importorskip("rclpy")
+    pytest.importorskip("lm_interfaces.srv")
+    from lm.keyframe_retargeter_node import KeyframeRetargeterNode
+
+    node = KeyframeRetargeterNode.__new__(KeyframeRetargeterNode)
+    node._target_box_center = np.array([1.2, -0.4, 0.15])
+    node._target_box_quat_wxyz = quat_wxyz_from_rpy_deg(
+        np.array([4.0, -6.0, 21.0])
+    )
+    node._stand_before_place_height_m = 0.9
+    node._target_box_orientation_offset_rpy_deg = np.array([7.0, 2.0, -13.0])
+
+    ik_call: dict[str, np.ndarray] = {}
+
+    def capture_ik(
+        _payload: dict[str, np.ndarray],
+        center: np.ndarray,
+        quat_wxyz: np.ndarray,
+    ) -> None:
+        ik_call["center"] = np.asarray(center).copy()
+        ik_call["quat_wxyz"] = np.asarray(quat_wxyz).copy()
+
+    node._apply_box_ik = capture_ik
+    payload = {
+        "object_position_xyz": np.zeros(3, dtype=np.float32),
+        "object_quat_wxyz": np.array(
+            [1.0, 0.0, 0.0, 0.0], dtype=np.float32
+        ),
+        "dof_positions": np.arange(29, dtype=np.float32),
+        "body_positions": np.arange(12, dtype=np.float32).reshape(4, 3),
+        "body_rotations": np.arange(16, dtype=np.float32).reshape(4, 4),
+    }
+    robot_fields_before = {
+        key: payload[key].copy()
+        for key in ("dof_positions", "body_positions", "body_rotations")
+    }
+
+    assert (
+        node._retarget_for_box_task("stand_before_place", payload)
+        == "ik_to_box_above_place_target"
+    )
+    np.testing.assert_allclose(
+        ik_call["quat_wxyz"], node._target_box_quat_wxyz, atol=0.0
+    )
+    np.testing.assert_allclose(ik_call["center"], [1.2, -0.4, 0.9])
+    expected_policy_quat = apply_target_box_orientation_offset(
+        node._target_box_quat_wxyz,
+        node._target_box_orientation_offset_rpy_deg,
+    )
+    np.testing.assert_allclose(
+        _rotmat_from_quat_wxyz(payload["object_quat_wxyz"]),
+        _rotmat_from_quat_wxyz(expected_policy_quat),
+        atol=1e-7,
+    )
+    for key, expected in robot_fields_before.items():
+        np.testing.assert_array_equal(payload[key], expected)
