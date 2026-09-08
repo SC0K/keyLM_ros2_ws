@@ -159,7 +159,7 @@ class VLMClientNode(Node):
         )
         self.declare_parameter("default_place_distance_m", 1.0)
         self.declare_parameter("stand_before_pick_offset_m", 0.3)
-        self.declare_parameter("pick_max_horizontal_distance_m", 0.5)
+        self.declare_parameter("pick_max_horizontal_distance_m", 0.45)
         self.declare_parameter("stand_after_pick_height_m", 1.0)
         self.declare_parameter("stand_before_place_height_m", 1.0)
         self.declare_parameter("min_stand_root_height_m", 0.78)
@@ -173,7 +173,7 @@ class VLMClientNode(Node):
             "default_box_forward_axis",
             REAL_TARGET_BOX_GEOMETRY.forward_axis,
         )
-        self.declare_parameter("stationary_hold_sec", 1.0)
+        self.declare_parameter("stationary_hold_sec", 0.5)
         self.declare_parameter("min_action_duration_sec", 1.0)
         self.declare_parameter("robot_linear_stationary_threshold_mps", 0.1)
         self.declare_parameter("robot_angular_stationary_threshold_radps", 0.15)
@@ -916,10 +916,10 @@ class VLMClientNode(Node):
                 "For the first request previous_action is none. For later requests previous_action is the keyframe selected by the previous VLM response. "
                 "If previous_action_finished is true and previous_action_success is false, the previous keyframe stopped with tracking or object error above threshold. "
                 "Object success and task completion use box position only; object orientation errors are diagnostic and ignored. "
-                "The stand_before_pick action is also successful when the robot root is within 0.5 m horizontally of the current box. "
+                f"The stand_before_pick action is also successful when the robot root is within {self._pick_max_horizontal_distance_m:g} m in the XY plane of the current box center. "
                 "Use the image to check whether the robot is actually holding the box with two hands during object-aware carry/place phases, or whether the box has slipped, dropped, or is not controlled. "
-                "Select crouch_to_pick only when distance_context.pick_within_horizontal_reach is true, meaning robot_to_object_xy_distance_m is at most 0.5 m. "
-                "If that distance is greater than 0.5 m or unavailable, select stand_before_pick so the robot approaches the box before attempting to pick it. "
+                f"Select crouch_to_pick only when distance_context.pick_within_horizontal_reach is true, meaning robot_to_object_xy_distance_m is at most {self._pick_max_horizontal_distance_m:g} m. "
+                f"If that distance is greater than {self._pick_max_horizontal_distance_m:g} m or unavailable, select stand_before_pick so the robot approaches the box before attempting to pick it. "
                 "On failure, do not advance to the next semantic phase; retry the previous keyframe when safe, or choose a safe standing/setup keyframe before retrying. "
                 "For failed pick actions such as crouch_to_pick or stand_after_pick, recover with stand_before_pick first, then retry crouch_to_pick. "
                 "For failed place actions such as stand_before_place or crouch_to_place, retry the failed place keyframe if still safe, or recover with stand_before_place before retrying crouch_to_place. "
