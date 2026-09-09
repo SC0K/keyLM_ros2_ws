@@ -158,7 +158,11 @@ The camera-only node keeps images local. A VLM query sends a fresh image to the
 configured model server through the tunnel. After unplugging/replugging the
 camera, restart the camera/stack if fresh images do not resume.
 
-The controller's waiting stand and the VLM `stand_before_pick` / `stand_after_place`
+The controller's idle waiting stand (before any VLM goal) uses default joint
+angles with **no added lean**, in no-object mode. This is independent of the
+standing-lean setting below.
+
+The VLM `stand_before_pick` / `stand_after_place`
 goals use `default_angles` from `g1_keyframe_tracking_obj.yaml` plus
 `standing_waist_pitch_deg` (default **5 degrees forward**, defined by
 `VLM_STANDING_LEAN_DEG` in `lm/generated_stand.py`) and upright root yaw.
