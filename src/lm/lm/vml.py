@@ -5,6 +5,7 @@ import json
 import math
 import sys
 import time
+import uuid
 from io import BytesIO
 
 import numpy as np
@@ -13,7 +14,8 @@ from crl_humanoid_msgs.msg import Monitor
 from geometry_msgs.msg import PoseStamped
 from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.node import Node
-from std_msgs.msg import String, UInt8MultiArray
+from std_msgs.msg import MultiArrayDimension, String, UInt8MultiArray
+from lm.supervised_goal import APPROVED_SUFFIX, CANCEL_SUFFIX, PREVIEW_SUFFIX, PREVIEW_REFRESH_SEC
 
 from lm.box_config import (
     DEFAULT_TARGET_BOX_QUAT_WXYZ,
@@ -34,7 +36,7 @@ _AXIS_TO_LOCAL_VEC = {
 }
 
 _GLOBAL_X_WORLD = np.array([1.0, 0.0, 0.0], dtype=np.float64)
-_GLOBAL_X_YAW_QUAT_WXYZ = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+APPROACH_XY_OFFSET_M = 0.30
 _PICK_POSE_KEYFRAMES = frozenset({"stand_before_pick", "crouch_to_pick", "stand_after_pick"})
 
 
@@ -160,6 +162,7 @@ class VLMClientNode(Node):
         self.declare_parameter("tracking_error_topic", "/tracking_errors")
         self.declare_parameter("retarget_keyframe_service", "/retargeter/generate_keyframe")
         self.declare_parameter("retargeted_keyframe_topic", "/retargeter/output_keyframe")
+        self.declare_parameter("supervised_mode", False)
         self.declare_parameter("retargeted_info_topic", "/retargeter/output_info")
         self.declare_parameter("planner_status_topic", "/vlm_planner/status")
         self.declare_parameter("planner_decision_topic", "/vlm_planner/decision")
@@ -306,6 +309,11 @@ class VLMClientNode(Node):
         )
         self._retarget_client = self.create_client(RetargetKeyframe, retarget_keyframe_service)
         self._retargeted_keyframe_pub = self.create_publisher(UInt8MultiArray, retargeted_keyframe_topic, 10)
+        self.supervised_mode = bool(self.get_parameter("supervised_mode").value)
+        self._approved_preview_id = None
+        self._preview_pub = self.create_publisher(UInt8MultiArray, retargeted_keyframe_topic + PREVIEW_SUFFIX, 10)
+        self._cancel_preview_pub = self.create_publisher(String, retargeted_keyframe_topic + CANCEL_SUFFIX, 10)
+        self.create_subscription(String, retargeted_keyframe_topic + APPROVED_SUFFIX, self._on_goal_approved, 10)
         self._retargeted_info_pub = self.create_publisher(String, retargeted_info_topic, 10)
         self._planner_status_pub = self.create_publisher(String, planner_status_topic, 10)
         self._planner_decision_pub = self.create_publisher(String, planner_decision_topic, 10)
@@ -350,6 +358,8 @@ class VLMClientNode(Node):
 
     @staticmethod
     def _effective_object_to_manipulate(response: VLMQuery.Response) -> bool:
+        if response.next_keyframe == "approach":
+            return False
         return (
             bool(response.object_in_manipulation)
             or response.next_keyframe in MANIPULATION_KEYFRAMES
@@ -600,6 +610,21 @@ class VLMClientNode(Node):
         root_quat = _yaw_to_quat_wxyz(float(math.atan2(facing_dir[1], facing_dir[0])))
         return root_center, root_quat
 
+    def _approach_root_pose(self) -> tuple[np.ndarray, np.ndarray]:
+        """Stop 0.30 m from the current object centre, on the robot-facing side."""
+        center = self._current_box_center.copy()
+        direction = center[:2] - self._current_robot_center[:2]
+        quat = self._current_robot_quat_wxyz.copy()
+        if np.linalg.norm(direction) > 1e-9:
+            quat = _yaw_to_quat_wxyz(float(math.atan2(direction[1], direction[0])))
+        else:
+            # Coincident XY: use current heading to choose a stable approach side.
+            forward = _quat_wxyz_to_rotmat(quat)[:2, 0]
+            quat = _yaw_to_quat_wxyz(float(math.atan2(forward[1], forward[0])))
+        center[:2] -= APPROACH_XY_OFFSET_M * _quat_wxyz_to_rotmat(quat)[:2, 0]
+        # The retargeter supplies root Z from stand_before_pick.npz.
+        return center, quat
+
     def _update_box_forward_axis_from_robot_once(self) -> bool:
         """Latch the physical box axis aligned with the desired pickup approach."""
         if self._box_forward_axis_initialized_from_robot:
@@ -839,6 +864,8 @@ class VLMClientNode(Node):
             "root_orientation_error_rad": (root_orientation_error, self._root_orientation_success_threshold_rad),
             "object_position_error_m": (object_position_error, self._object_position_success_threshold_m),
         }
+        if self._last_action_name == "approach":
+            metrics.pop("object_position_error_m")
         self._action_success_checks = {
             name: {"value": value, "threshold": threshold, "passed": value is not None and value <= threshold}
             for name, (value, threshold) in metrics.items()
@@ -846,7 +873,7 @@ class VLMClientNode(Node):
         generic_success = all(check["passed"] for check in self._action_success_checks.values())
         distance_context = self._distance_context()
         stand_before_pick_reach_success = bool(
-            self._last_action_name == "stand_before_pick"
+            self._last_action_name in ("approach", "stand_before_pick")
             and distance_context["pick_within_horizontal_reach"]
         )
         self._last_action_success = bool(generic_success or stand_before_pick_reach_success)
@@ -914,12 +941,12 @@ class VLMClientNode(Node):
                 "For the first request previous_action is none. For later requests previous_action is the keyframe selected by the previous VLM response. "
                 "If previous_action_finished is true and previous_action_success is false, the previous keyframe stopped with tracking or object error above threshold. "
                 "Object success and task completion use box position only; object orientation errors are diagnostic and ignored. "
-                f"The stand_before_pick action is also successful when the robot root is within {self._pick_max_horizontal_distance_m:g} m in the XY plane of the current box center. "
+                f"The approach and stand_before_pick actions are also successful when the robot root is within {self._pick_max_horizontal_distance_m:g} m in the XY plane of the current box center. "
                 "Use the image to check whether the robot is actually holding the box with two hands during object-aware carry/place phases, or whether the box has slipped, dropped, or is not controlled. "
                 f"Select crouch_to_pick only when distance_context.pick_within_horizontal_reach is true, meaning robot_to_object_xy_distance_m is at most {self._pick_max_horizontal_distance_m:g} m. "
-                f"If that distance is greater than {self._pick_max_horizontal_distance_m:g} m or unavailable, select stand_before_pick so the robot approaches the box before attempting to pick it. "
+                f"Before pickup, if that distance is greater than {self._pick_max_horizontal_distance_m:g} m or unavailable, select approach (locomotion). Once within reach, select stand_before_pick to prepare the grasp. Never use approach while holding the box. "
                 "On failure, do not advance to the next semantic phase; retry the previous keyframe when safe, or choose a safe standing/setup keyframe before retrying. "
-                "For failed pick actions such as crouch_to_pick or stand_after_pick, recover with stand_before_pick first, then retry crouch_to_pick. "
+                "For failed pick actions, use approach if out of reach and not holding the box; otherwise recover with stand_before_pick before retrying crouch_to_pick. "
                 "For failed place actions such as stand_before_place or crouch_to_place, retry the failed place keyframe if still safe, or recover with stand_before_place before retrying crouch_to_place. "
                 "For failed final standby, retry stand_after_place. "
                 "Required placement order: stand_before_place -> crouch_to_place -> stand_after_place. "
@@ -932,10 +959,36 @@ class VLMClientNode(Node):
                 "measured_task_completion is true, and the image confirms final standby with the object supported at the destination and no longer held. "
                 "Do not predict completion of the newly selected action: task_completion true stops the planner immediately. "
                 "The VLM response field object_in_manipulation is the same effective flag as object_to_manipulate: true means both retargeting and policy should consider the object. "
-                "Set it true for all six pick-and-place keyframes, including stand_before_pick and final stand_after_place, so every policy goal receives the measured object pose in the robot base frame."
+                "The node fixes this flag: false for approach, true for all six pick/place keyframes. The VLM's returned flag is ignored."
             ),
         }
         return json.dumps(context, indent=2)
+
+    def _on_goal_approved(self, msg: String) -> None:
+        self._approved_preview_id = msg.data
+
+    def _wait_for_goal_approval(self, message: UInt8MultiArray, name: str) -> bool:
+        token = uuid.uuid4().hex
+        message.layout.dim = [MultiArrayDimension(label=token, size=len(message.data), stride=len(message.data))]
+        self._approved_preview_id = None
+        self.publish_status("awaiting_approval", f"Preview: {name}. Press N in the monitor or R1+A to execute.",
+                            keyframe=name, preview_id=token)
+        try:
+            next_refresh = 0.0
+            while rclpy.ok():
+                now = time.monotonic()
+                if now >= next_refresh:
+                    # Refresh a short lease; a stopped/crashed planner leaves no
+                    # indefinitely approvable goal. Duplicate IDs never reapply.
+                    self._preview_pub.publish(message)
+                    next_refresh = now + PREVIEW_REFRESH_SEC
+                rclpy.spin_once(self, timeout_sec=0.1)
+                if self._approved_preview_id == token:
+                    return True
+            return False
+        finally:
+            if rclpy.ok():
+                self._cancel_preview_pub.publish(String(data=token))
 
     def publish_planner_outputs(self, response: VLMQuery.Response) -> bool:
         if not self._has_actual_box_pose:
@@ -948,12 +1001,12 @@ class VLMClientNode(Node):
         # The service field name is kept for compatibility; this is the single
         # object-aware retargeting and policy mask.
         object_to_manipulate = self._effective_object_to_manipulate(response)
-        if object_to_manipulate and not bool(response.object_in_manipulation):
+        if object_to_manipulate != bool(response.object_in_manipulation):
             self.get_logger().info(
-                "Forcing object_to_manipulate=true for %s because this keyframe requires object-aware retargeting."
-                % response.next_keyframe
+                "Setting object_to_manipulate=%s for %s from the fixed keyframe-mode mapping."
+                % (object_to_manipulate, response.next_keyframe)
             )
-            response.object_in_manipulation = True
+        response.object_in_manipulation = object_to_manipulate
         if object_to_manipulate:
             self._update_box_forward_axis_from_robot_once()
 
@@ -1003,7 +1056,9 @@ class VLMClientNode(Node):
 
         target_root_center = self._default_target_root_center.copy()
         target_root_quat = self._default_target_root_quat_wxyz.copy()
-        if response.next_keyframe == "stand_before_pick":
+        if response.next_keyframe == "approach":
+            target_root_center, target_root_quat = self._approach_root_pose()
+        elif response.next_keyframe == "stand_before_pick":
             target_root_center, target_root_quat = self._stand_before_pick_root_pose()
         elif response.next_keyframe == "stand_after_place":
             if self._has_robot_root_pose or self._has_monitor:
@@ -1049,7 +1104,12 @@ class VLMClientNode(Node):
 
         keyframe_msg = UInt8MultiArray()
         keyframe_msg.data = list(retarget_response.retargeted_keyframe)
-        self._retargeted_keyframe_pub.publish(keyframe_msg)
+        if self.supervised_mode:
+            self.publish_decision(response, published=False)
+            if not self._wait_for_goal_approval(keyframe_msg, response.next_keyframe):
+                return False
+        else:
+            self._retargeted_keyframe_pub.publish(keyframe_msg)
 
         if retarget_response.retargeted_info:
             info_msg = String()

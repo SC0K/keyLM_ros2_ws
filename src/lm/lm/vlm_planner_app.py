@@ -21,6 +21,8 @@ from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import Image as ImageMsg
 from std_msgs.msg import String
+from std_srvs.srv import SetBool
+from lm.supervised_goal import SET_MODE_SUFFIX
 
 from lm.box_config import REAL_TARGET_BOX_GEOMETRY, SIM_TARGET_BOX_GEOMETRY, parse_box_size_xyz
 from lm.vlm_connection import (
@@ -45,6 +47,7 @@ GOAL_BODY_LINKS = (
 )
 
 PLANNER_EXTRA_DEFAULTS = {
+    "supervised_mode": False,
     "robot_root_pose_topic": "",
     "retarget_keyframe_service": "/retargeter/generate_keyframe",
     "retargeted_keyframe_topic": "/retargeter/output_keyframe",
@@ -150,6 +153,8 @@ class PlannerAppNode(Node):
         )
 
         self._lock = threading.Lock()
+        self.supervised_mode_client = self.create_client(
+            SetBool, str(self.get_parameter("retargeted_keyframe_topic").value) + SET_MODE_SUFFIX)
         self.robot_pos: np.ndarray | None = None
         self.robot_quat: np.ndarray | None = None
         self.box_pos: np.ndarray | None = None
@@ -349,6 +354,8 @@ class VLMPlannerApp:
         self.tunnel_status = tk.StringVar(value="Tunnel: starting")
         self.planner_status = tk.StringVar(value="Planner: idle")
         self.server_selection = tk.StringVar(value=args.server)
+        self.supervised_selection = tk.BooleanVar(value=bool(node.get_parameter("supervised_mode").value))
+        self._mode_sync = None
         self._tunnel_check_id = None
         self.request_photo = None
         self._request_photo_cache_key = None
@@ -441,6 +448,11 @@ class VLMPlannerApp:
         buttons.columnconfigure(1, weight=1)
         ttk.Button(buttons, text="Start", command=self.start_planner).grid(row=0, column=0, sticky="ew", padx=(0, 4))
         ttk.Button(buttons, text="Stop", command=self.stop_planner).grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        self.supervised_toggle = ttk.Checkbutton(
+            buttons, text="Supervised mode (N / R1+A to approve)", variable=self.supervised_selection)
+        self.supervised_toggle.grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Label(buttons, text="Applies on Start. Stop planning before changing mode.").grid(
+            row=2, column=0, columnspan=2, sticky="w")
 
         ttk.Label(right, text="Retargeted Keyframe", font=("TkDefaultFont", 11, "bold")).grid(row=3, column=0, sticky="w", pady=(12, 4))
         self.retarget_text = tk.Text(right, width=42, height=8, wrap="word", state="disabled")
@@ -551,6 +563,8 @@ class VLMPlannerApp:
             self._tunnel_check_id = self.root.after(1000, self._check_tunnel_started)
 
     def start_planner(self) -> None:
+        if self._mode_sync is not None:
+            return
         task = self.task_text.get("1.0", "end").strip()
         if not task:
             self._append_status("ui", "task command is empty")
@@ -559,6 +573,37 @@ class VLMPlannerApp:
             self._append_status("ui", "planner is already running")
             return
 
+        self._mode_sync = (task, bool(self.supervised_selection.get()), time.monotonic() + 5.0, None)
+        self.supervised_toggle.configure(state="disabled")
+        self.bottom_status.set("Synchronizing supervision with the robot controller...")
+        self._sync_supervised_mode()
+
+    def _sync_supervised_mode(self) -> None:
+        if self._mode_sync is None:
+            return
+        task, enabled, deadline, future = self._mode_sync
+        try:
+            if future is None and self.node.supervised_mode_client.service_is_ready():
+                future = self.node.supervised_mode_client.call_async(SetBool.Request(data=enabled))
+                self._mode_sync = (task, enabled, deadline, future)
+            if future is not None and future.done():
+                result = future.result()
+                if not result.success:
+                    raise RuntimeError(result.message)
+                self._mode_sync = None
+                self._launch_planner(task, enabled)
+                return
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Controller mode service unavailable/timed out. Start or restart the updated robot controller.")
+        except Exception as exc:
+            self._mode_sync = None
+            self.supervised_toggle.configure(state="normal")
+            self.bottom_status.set(f"Planner not started: {exc}")
+            self._append_status("ui", f"Planner not started: {exc}")
+            return
+        self.root.after(100, self._sync_supervised_mode)
+
+    def _launch_planner(self, task: str, supervised_mode: bool) -> None:
         cmd = [
             sys.executable,
             "-m",
@@ -572,7 +617,7 @@ class VLMPlannerApp:
         ]
         # The GUI and the subprocess must observe the same robot/object. ROS
         # parameters passed to the GUI are not inherited by a subprocess.
-        cmd.extend(planner_ros_arguments(self.node))
+        cmd.extend(planner_ros_arguments(self.node, supervised_mode=supervised_mode))
 
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
@@ -596,6 +641,11 @@ class VLMPlannerApp:
         self._read_stream(self.proc.stderr, "planner")
 
     def stop_planner(self) -> None:
+        if self._mode_sync is not None:
+            self._mode_sync = None
+            self.supervised_toggle.configure(state="normal")
+            self.bottom_status.set("Planner start cancelled")
+            return
         if self.proc is None or self.proc.poll() is not None:
             self._append_status("ui", "planner is not running")
             return
@@ -638,6 +688,7 @@ class VLMPlannerApp:
             code = self.proc.returncode
             self.planner_status.set(f"Planner: exited ({code})")
             self.proc = None
+        self.supervised_toggle.configure(state="disabled" if self.proc is not None or self._mode_sync is not None else "normal")
 
     def _update_side_panels(self, snap: dict) -> None:
         status = snap["planner_status"]
@@ -825,6 +876,7 @@ class VLMPlannerApp:
         if getattr(self, "_closed", False):
             return
         self._closed = True
+        self._mode_sync = None
         self._cancel_tunnel_check()
         # Closing the app or Ctrl-C on the combined launch must also reap the
         # planner and only the tunnel created by this GUI (never an external one).
@@ -905,11 +957,12 @@ def _format_tracking_summary(snap: dict) -> str:
     return "\n".join(lines)
 
 
-def planner_ros_arguments(node: PlannerAppNode) -> list[str]:
+def planner_ros_arguments(node: PlannerAppNode, supervised_mode: bool | None = None) -> list[str]:
     args = ["--ros-args"]
     for name in ("monitor_topic", "actual_box_pose_topic", "tracking_error_topic", "box_size_xyz",
                  "retargeted_info_topic", *PLANNER_EXTRA_DEFAULTS):
-        args.extend(["-p", f"{name}:={json.dumps(node.get_parameter(name).value)}"])
+        value = supervised_mode if name == "supervised_mode" and supervised_mode is not None else node.get_parameter(name).value
+        args.extend(["-p", f"{name}:={json.dumps(value)}"])
     return args
 
 

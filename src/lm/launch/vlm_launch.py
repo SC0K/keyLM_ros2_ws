@@ -175,6 +175,8 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("retarget_keyframe_service", default_value="/retargeter/generate_keyframe"),
             DeclareLaunchArgument("retargeted_keyframe_topic", default_value="/retargeter/output_keyframe"),
             DeclareLaunchArgument("retargeted_info_topic", default_value="/retargeter/output_info"),
+            DeclareLaunchArgument("supervised_mode", default_value="false",
+                                  description="Preview each VLM goal and wait for N or R1+A approval."),
             DeclareLaunchArgument(
                 "task_text",
                 default_value="Pick up the box on the ground and place it 1m at the front.",
@@ -293,6 +295,7 @@ def generate_launch_description() -> LaunchDescription:
                                 "retarget_keyframe_service": retarget_keyframe_service,
                                 "retargeted_keyframe_topic": retargeted_keyframe_topic,
                                 "retargeted_info_topic": retargeted_info_topic,
+                                "supervised_mode": ParameterValue(LaunchConfiguration("supervised_mode"), value_type=bool),
                             }
                         ],
                     )

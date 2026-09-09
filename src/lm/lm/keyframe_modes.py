@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 
-# Every action in the pick-and-place library must expose the measured object
-# pose to the policy, including the standing setup and final standing frames.
+# Fixed VLM-node mapping, independent of model output and pickup distance.
+# approach uses locomotion/no-object mode; all six pick/place actions expose
+# the object, including stand_before_pick.
 MANIPULATION_KEYFRAMES = frozenset(
     {
         "stand_before_pick",
@@ -15,3 +16,8 @@ MANIPULATION_KEYFRAMES = frozenset(
         "stand_after_place",
     }
 )
+
+
+def source_keyframe_name(keyframe_name: str) -> str:
+    """Approach reuses the pickup stand; no duplicate NPZ is required."""
+    return "stand_before_pick" if keyframe_name == "approach" else keyframe_name

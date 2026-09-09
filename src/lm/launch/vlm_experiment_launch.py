@@ -33,6 +33,7 @@ def _robot_launch(context):
         launch_arguments={
             "current_object_pose_topic": LaunchConfiguration("actual_box_pose_topic"),
             "retargeted_keyframe_topic": LaunchConfiguration("retargeted_keyframe_topic"),
+            "supervised_mode": LaunchConfiguration("supervised_mode"),
         }.items(),
     )]
 
@@ -51,6 +52,7 @@ def _planner_app(context):
     )}
     parameters["box_size_xyz"] = parse_box_size_xyz(value("box_size_xyz")).tolist()
     parameters["stand_before_pick_distance_m"] = float(value("stand_before_pick_distance_m"))
+    parameters["supervised_mode"] = IfCondition(LaunchConfiguration("supervised_mode")).evaluate(context)
     # Send the axis as a quoted CLI literal (ROS Humble interprets bare YAML y
     # as boolean even when the launch parameter is explicitly typed as str).
     arguments += ["--ros-args", "-p", "default_box_forward_axis:=" + repr(value("box_hold_forward_axis"))]
@@ -64,6 +66,8 @@ def generate_launch_description():
                               description="Real starts hardware/OptiTrack; neither mode starts a task automatically."),
         DeclareLaunchArgument("start_robot", default_value="true",
                               description="Start robot/controller and monitor. False if already running."),
+        DeclareLaunchArgument("supervised_mode", default_value="false",
+                              description="Preview VLM goals; approve with N in the monitor or R1+A."),
         DeclareLaunchArgument("server", default_value=DEFAULT_SERVER, choices=list(SERVER_PROFILES)),
         DeclareLaunchArgument("manage_tunnel", default_value="true",
                               description="Let the GUI manage SSH. False for an existing external tunnel."),

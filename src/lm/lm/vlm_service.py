@@ -27,6 +27,7 @@ except ImportError:
 
 
 AllowedKeyframe = Literal[
+    "approach",
     "crouch_to_pick",
     "crouch_to_place",
     "stand_after_pick",
@@ -49,7 +50,9 @@ planner_context and current image together. Do not assume an action executed
 successfully merely because it was selected, published, or the robot stopped.
 
 KEYFRAME MEANINGS
-- stand_before_pick: approach/prepare to pick. Does NOT grasp or lift.
+- approach: locomotion toward the box when outside pickup reach. No grasp or lift;
+  object inputs are masked by the robot node. Never use while holding the box.
+- stand_before_pick: object-aware preparation at the pickup stance. Does NOT grasp or lift.
 - crouch_to_pick: lower the robot and establish the grasp. Does NOT complete lifting.
 - stand_after_pick: stand and lift the grasped object. Does NOT carry it to its destination.
 - stand_before_place: carry/position the object ABOVE the placement location,
@@ -61,7 +64,7 @@ KEYFRAME MEANINGS
 
 REQUIRED PROGRESSION
 Normal successful order:
-stand_before_pick -> crouch_to_pick -> stand_after_pick -> stand_before_place
+approach (if initially too far) -> stand_before_pick -> crouch_to_pick -> stand_after_pick -> stand_before_place
 -> crouch_to_place -> stand_after_place.
 Select only the next step, never skip an intermediate manipulation step.
 In particular, NEVER transition directly from stand_before_place to
@@ -71,18 +74,21 @@ DECISION PROCEDURE (apply in this order)
 1. Read previous_action, previous_action_finished, previous_action_success,
    stationary, distance_context, tracking_errors, and measured_task_completion.
    Treat missing/null evidence as unknown, not success.
-2. On the first request (previous_action="none"), choose stand_before_pick unless
-   pick_within_horizontal_reach is true and the image supports a safe immediate
-   pickup; only then may you choose crouch_to_pick. Do not jump to carry/place/finish.
+2. On the first request, if pick_within_horizontal_reach is false or unknown,
+   choose approach. If already within reach choose stand_before_pick, or
+   crouch_to_pick only if the image supports a safe immediate pickup.
+   Do not jump to carry/place/finish.
 3. For an existing previous action, if previous_action_finished is false, do not
    advance. Select the same action only if safe; otherwise a safe recovery/setup
    action. task_completion must be false.
 4. If previous_action_success is false or null, or the image contradicts success,
    do not advance or claim completion. Apply the recovery rules below.
 5. Only for a finished, successful action with consistent visual evidence:
+   - approach -> stand_before_pick when within horizontal pickup reach;
+     otherwise repeat approach. Do not jump from approach directly to pickup.
    - stand_before_pick -> crouch_to_pick, but ONLY when
      distance_context.pick_within_horizontal_reach is true.
-     Otherwise repeat stand_before_pick.
+     Otherwise select approach if not holding the object.
    - crouch_to_pick -> stand_after_pick, only with the grasp established.
    - stand_after_pick -> stand_before_place, only with the object held securely.
    - stand_before_place -> crouch_to_place, only when safely positioned to lower it.
@@ -93,7 +99,7 @@ DECISION PROCEDURE (apply in this order)
 INTERPRET THE MEASUREMENTS CORRECTLY
 previous_action_finished means stationary long enough; it does NOT prove success.
 previous_action_success checks configured tracking/object errors, with a horizontal
-reach exception for stand_before_pick. Verify the image is consistent with it.
+reach exception for approach and stand_before_pick. Verify the image is consistent with it.
 measured_task_completion means object POSITION is inside a tolerance around the
 destination. It does NOT prove that crouch_to_place happened, that the object was
 released, that the support surface carries its weight, or that the final stand
@@ -104,8 +110,10 @@ Use the configured XY reach test, not 3D robot-to-object distance, for pickup.
 If the object/support/grasp is occluded or ambiguous, do not claim visual success.
 
 RECOVERY
-- Failed pick/lift or lost grasp: stand_before_pick, then retry crouch_to_pick
-  only after the approach/reach conditions are satisfied.
+- Failed approach: repeat approach while out of reach; once within reach,
+  select stand_before_pick when safe.
+- Failed pick/lift or lost grasp: approach if out of reach and not holding the
+  object, otherwise stand_before_pick; retry crouch_to_pick only after setup.
 - Failed stand_before_place/crouch_to_place while safely holding the object:
   retry that action if safe, or use stand_before_place to re-establish placement
   setup, then crouch_to_place. NEVER recover by skipping to stand_after_place.
@@ -131,10 +139,13 @@ Never predict that a newly selected action will finish the task: the caller uses
 task_completion=true to stop planning immediately.
 
 OBJECT OBSERVATION FLAG
-Always set object_in_manipulation=true for all six library keyframes, including
+Always set object_in_manipulation=true for the six pick/place keyframes, including
 both setup and final standing poses. This flag enables object-aware retargeting
 and current-object/goal observations; it does NOT mean the hands currently hold
 the object.
+
+The separate approach action is forced to no-object locomotion by the robot
+node, regardless of the returned object_in_manipulation flag.
 
 EXAMPLES (conditions in each example must actually be observed)
 Finished/successful stand_before_place, safely holding above the destination:
@@ -189,6 +200,7 @@ class VLMServiceNode(Node):
         self._image_wait_timeout_sec = float(self.get_parameter("image_wait_timeout_sec").value)
 
         self._allowed_keyframes = [
+            "approach",
             "crouch_to_pick",
             "crouch_to_place",
             "stand_after_pick",
@@ -353,8 +365,8 @@ class VLMServiceNode(Node):
             response.error_message = ""
             response.next_keyframe = decision.next_keyframe
             response.object_in_manipulation = (
-                decision.object_in_manipulation
-                or decision.next_keyframe in MANIPULATION_KEYFRAMES
+                decision.next_keyframe != "approach"
+                and (decision.object_in_manipulation or decision.next_keyframe in MANIPULATION_KEYFRAMES)
             )
             response.task_completion = decision.task_completion
             response.raw_json = raw_json

@@ -1,6 +1,7 @@
 """VLM rigid placement preserves reference motion; standing goals share test defaults."""
 
 from io import BytesIO
+import json
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -131,6 +132,54 @@ def test_vlm_stand_matches_test_generated_goal(retargeter, name):
     np.testing.assert_allclose(actual[:3], [1., .4, source_root_z])
     assert VLM_STANDING_LEAN_DEG == 5.0
     np.testing.assert_allclose(actual[9 + POLICY_JOINT_NAMES.index("waist_pitch_joint")], np.deg2rad(5.0), atol=1e-6)
+
+
+@pytest.mark.parametrize("ik_enabled", [False, True])
+def test_locomotion_approach_keeps_root_target_and_masks_goal_object(retargeter, ik_enabled):
+    from crl_g1_goalcontroller_python.g1_keyframe_controller import (
+        G1KeyframeController, FEATURE_BODY_NAMES, MUJOCO_JOINT_NAMES, goal_state_from_payload,
+    )
+    retargeter._retarget_ik_enabled = ik_enabled
+    original = retargeter._load_payload("stand_before_pick")
+    retargeter._target_root_center = retargeter._current_box_center.copy()
+    retargeter._target_root_center[:2] -= .30 * _quat_wxyz_to_rotmat(retargeter._target_root_quat_wxyz)[:2, 0]
+    blob, info = retargeter._process_keyframe("approach", True)
+    with np.load(BytesIO(blob), allow_pickle=True) as payload:
+        assert not bool(payload["object_to_manipulate"][0])
+        np.testing.assert_array_equal(payload["dof_positions"], original["dof_positions"])
+        np.testing.assert_array_equal(payload["object_position_xyz"], np.zeros(3))
+        np.testing.assert_array_equal(payload["object_quat_wxyz"], np.zeros(4))
+        goal = goal_state_from_payload(payload, retargeter._standing_default_angles)
+    np.testing.assert_allclose(goal[0, :2], retargeter._target_root_center[:2], atol=1e-6)
+    np.testing.assert_allclose(np.linalg.norm(goal[0, :2] - retargeter._current_box_center[:2]), .30, atol=1e-6)
+    assert goal[0, 2] == original["body_positions"][list(original["body_names"]).index("pelvis"), 2]
+    assert json.loads(info)["object_to_manipulate"] is False
+    controller = G1KeyframeController.__new__(G1KeyframeController)
+    controller.model = retargeter._ik_model
+    controller.data = mujoco.MjData(controller.model)
+    controller.default_angles = retargeter._standing_default_angles
+    controller.num_actions = 29
+    controller.object_to_manipulate = False
+    controller.walking_goal_joint_noise_std = 0.0
+    controller.feature_body_ids = [controller.model.body(n).id for n in FEATURE_BODY_NAMES]
+    controller.joint_qpos_adr = np.array([controller.model.joint(n).qposadr[0] for n in MUJOCO_JOINT_NAMES])
+    controller.policy_to_mujoco = np.array([POLICY_JOINT_NAMES.index(n) for n in MUJOCO_JOINT_NAMES])
+    walking_goal = controller._replace_walking_goal_pose_with_default_noise(goal)[0]
+    np.testing.assert_allclose(walking_goal[:3], goal[0, :3], atol=1e-6)
+    # The existing locomotion override makes the root upright, preserving yaw.
+    np.testing.assert_allclose(walking_goal[3:9],
+                               _quat_wxyz_to_rotmat(retargeter._target_root_quat_wxyz)[:2, :].reshape(-1), atol=1e-6)
+    np.testing.assert_array_equal(walking_goal[9:38], np.zeros(29))
+    np.testing.assert_array_equal(walking_goal[-7:], np.zeros(7))
+    assert controller._goal_object_observation_mask(walking_goal) == 0.0
+    retargeter._apply_box_ik.assert_not_called()
+
+
+def test_stand_before_pick_is_restored_to_manipulation(retargeter):
+    blob, _ = retargeter._process_keyframe("stand_before_pick", False)
+    with np.load(BytesIO(blob), allow_pickle=True) as payload:
+        assert bool(payload["object_to_manipulate"][0])
+        assert np.linalg.norm(payload["object_quat_wxyz"]) > .99
 
 
 @pytest.mark.parametrize("target_axis", ["x", "-x", "y", "-y"])

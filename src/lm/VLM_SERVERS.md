@@ -41,6 +41,45 @@ planner/tunnel; an externally managed tunnel is not stopped. GUI **Stop** stops
 planning only, not the robot controller; use the robot's normal safety controls
 to stop motion. A display and working noninteractive SSH login are required.
 
+## Supervised goal approval
+
+Add `supervised_mode:=true` to the combined launch in either mode:
+
+```bash
+ros2 launch lm vlm_experiment_launch.py mode:=sim server:=tars supervised_mode:=true
+ros2 launch lm vlm_experiment_launch.py mode:=real server:=tars supervised_mode:=true
+```
+
+The GUI also has a **Supervised mode** checkbox below Start/Stop, initialized
+from the launch argument. Stop planning to change it, then press **Start**.
+Start synchronizes the controller mode before launching the planner; it refuses
+to start if the controller cannot confirm the setting. A mode change discards
+any unapproved preview without executing it and leaves the active goal alone.
+No robot-stack relaunch is needed to switch modes after installing this update.
+
+Each proposed goal appears in the monitor first. The GUI reports
+`awaiting_approval`. Focus the **robot monitor window** and press **N**, or on
+the real robot hold **R1** and press **A**, to activate that exact preview.
+The robot must already be in **GOAL** mode; approval does not switch the FSM.
+The monitor's existing target-overlay visibility setting still applies.
+
+Until approval, the policy continues its previous goal (or its idle stance
+before the first goal); it does not receive the preview as a policy input.
+Tracking errors still describe the active goal, while the monitor shows the
+pending goal. The planner waits and starts the new action timer only after
+controller acknowledgement. Goal JSON and manipulation masks are unchanged.
+
+Repeated presses with no pending goal do nothing. Stopping/crashing the planner
+invalidates an unapproved preview within 3 seconds; it does **not** stop an
+already executing goal. Use the robot's normal safety controls to stop motion.
+Supervision defaults to `false`, preserving automatic operation.
+
+For separate processes or `start_robot:=false`, the GUI still synchronizes the
+updated controller through the service associated with `retargeted_keyframe_topic`.
+A standalone client without the GUI requires matching `supervised_mode:=true`
+on the robot launch and `-p supervised_mode:=true` in the client's ROS arguments.
+Preview-only topics cannot execute on a controller without supervision enabled.
+
 ## Separate-process launches
 
 Both profiles expose the remote Ollama API on local port **11434**. Keep the
@@ -173,7 +212,27 @@ VLM stands keep the root
 height from their library keyframe; the controller's waiting/test stands retain
 their separately configured standing height.
 These two VLM stands no longer use the library's authored joint pose. Object
-goals remain present. Set the lean to 0 for upright stands. If the controller uses
+goals remain present in manipulation mode. `stand_before_pick` is restored to
+`object_to_manipulate=true`, with its pickup stance 0.4 m from the box centre.
+
+The separate **`approach`** action always has `object_to_manipulate=false`.
+It reuses `stand_before_pick.npz` (no separate NPZ to edit). The retargeter places
+that library robot pose **0.30 m from the current box centre in XY, on the
+robot-facing side**, preserves its root
+height, faces the box, and zeroes the target object pose. The controller then
+overwrites the robot posture through its existing walking-goal
+path: default joint posture with configured walking-goal noise, measured and
+target object inputs masked out. The offset is `APPROACH_XY_OFFSET_M` in
+`lm/vml.py`; it is a centre-to-root XY distance, not clearance from the box
+surface. This is not a collision-avoiding path or the separate 0.4 m pickup stance.
+The VLM is instructed to choose `approach` when too far away, then
+`stand_before_pick` once within 0.45 m XY reach, then the normal pickup sequence.
+Never use `approach` while holding the box. Mode is fixed locally in
+`lm/keyframe_modes.py`, independent of the model's returned object flag; all six
+pick/place goals remain manipulation goals. JSON fields stay unchanged, with
+`approach` added to the allowed names. Locomotion success checks omit object
+tracking and accept reaching the pickup range.
+Set the lean to 0 for upright manipulation stands. If the controller uses
 a different policy config, pass that same path as `standing_config_file:=...`
 to the VLM launch.
 
@@ -191,7 +250,7 @@ The generated VLM stands preserve both root Z and object Z from their source
 library frame, while generating the configured standing joint pose and lean.
 
 Use `retarget_ik_enabled:=true` to restore the grasp-IK path for motion frames.
-All VLM keyframes preserve their source library root Z and object Z, with or
+All manipulation keyframes preserve their source library root Z and object Z, with or
 without IK. Observed/requested heights do not lift or lower these goals; only
 XY placement and orientation are retargeted. With IK enabled, joints may change
 but root Z is locked. The separate `stand_before_place_height_m`,

@@ -92,3 +92,19 @@ def test_gui_task_and_shutdown_are_explicit_and_idempotent():
         proc.terminate.assert_called_once()
         proc.wait.assert_called_once_with(timeout=2.0)
     app.root.destroy.assert_called_once()
+
+
+@pytest.mark.parametrize("mode", ["sim", "real"])
+def test_supervision_forwarded_to_robot_and_gui(launch_module, monkeypatch, mode):
+    context = context_for(launch_module, mode=mode, supervised_mode="true")
+    app_fn = launch_module["_planner_app"]
+    monkeypatch.setitem(app_fn.__globals__, "Node", lambda **kwargs: kwargs)
+    app = app_fn(context)[0]
+    params = evaluate_parameters(context, normalize_parameters(app["parameters"]))[0]
+    assert params["supervised_mode"] is True
+    include = launch_module["_robot_launch"](context)[0]
+    forwarded = {name: perform_substitutions(context, normalize_to_list_of_substitutions(value))
+                 for name, value in include.launch_arguments}
+    assert forwarded["supervised_mode"] == "true"
+    from lm.vlm_planner_app import PLANNER_EXTRA_DEFAULTS
+    assert "supervised_mode" in PLANNER_EXTRA_DEFAULTS

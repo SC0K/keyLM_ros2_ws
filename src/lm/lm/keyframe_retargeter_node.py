@@ -37,7 +37,7 @@ from lm.keyframe_box_retarget import (
     _yaw_from_matched_rotation,
 )
 from lm.generated_stand import POLICY_JOINT_NAMES, VLM_STANDING_LEAN_DEG, generated_stand_joint_delta
-from lm.keyframe_modes import MANIPULATION_KEYFRAMES
+from lm.keyframe_modes import MANIPULATION_KEYFRAMES, source_keyframe_name
 
 _AXIS_TO_LOCAL_VEC = {
     "x": np.array([1.0, 0.0, 0.0], dtype=np.float64),
@@ -424,8 +424,17 @@ class KeyframeRetargeterNode(Node):
             self._object_to_manipulate = bool(object_to_manipulate)
         if keyframe_name in MANIPULATION_KEYFRAMES:
             self._object_to_manipulate = True
+        elif keyframe_name == "approach":
+            self._object_to_manipulate = False
         payload = self._load_payload(keyframe_name)
-        if keyframe_name in ("stand_before_pick", "stand_after_place"):
+        if keyframe_name == "approach":
+            # Use the planner's approach root (offset from current box XY),
+            # keeping authored height/joints. The controller then replaces the
+            # posture through its existing locomotion-goal path.
+            self._apply_root_pose(payload, self._target_root_center, self._target_root_quat_wxyz)
+            self._zero_object_targets(payload)
+            mode = "approach_locomotion_at_offset_root"
+        elif keyframe_name in ("stand_before_pick", "stand_after_place"):
             mode = self._generate_stationary_stand(keyframe_name, payload)
         elif self._object_to_manipulate and not self._retarget_ik_enabled:
             mode = self._retarget_planar(keyframe_name, payload)
@@ -841,7 +850,7 @@ class KeyframeRetargeterNode(Node):
         return np.array([root_xy[0], root_xy[1], 0.0], dtype=np.float64), root_quat
 
     def _load_payload(self, keyframe_name: str) -> dict[str, np.ndarray]:
-        path = self._library_dir / f"{keyframe_name}.npz"
+        path = self._library_dir / f"{source_keyframe_name(keyframe_name)}.npz"
         if not path.exists():
             raise FileNotFoundError(f"Keyframe not found: {path}")
         with np.load(path, allow_pickle=True) as data:
