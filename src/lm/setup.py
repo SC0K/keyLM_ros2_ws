@@ -35,6 +35,7 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name, ['VLM_SERVERS.md']),
         (os.path.join('share', package_name, 'launch'), glob('launch/*_launch.py')),
     ] + _model_data_files() + _keyframe_data_files(),
     install_requires=[

@@ -76,7 +76,7 @@ class BoxGeometry:
 # remain in the keyframe NPZ files; current/target world poses arrive at runtime.
 # 0.345, 0.250, 0.285
 SOURCE_BOX_GEOMETRY = BoxGeometry(
-    size_xyz=(0.350, 0.350, 0.350),
+    size_xyz=(0.30, 0.30, 0.30),
     forward_axis="y",
     up_axis="-z",
 )

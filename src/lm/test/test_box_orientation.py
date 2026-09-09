@@ -81,7 +81,8 @@ def test_vlm_latches_the_nominal_physical_target_once() -> None:
     np.testing.assert_array_equal(node._task_target_box_quat_wxyz, latched)
 
 
-def test_vlm_retargeter_applies_offset_only_after_robot_ik() -> None:
+@pytest.mark.parametrize("source_height", [0.73, 0.9336])
+def test_vlm_retargeter_applies_offset_only_after_robot_ik(source_height) -> None:
     """The VLM path sends physical orientation to IK and offsets only its goal."""
     pytest.importorskip("rclpy")
     pytest.importorskip("lm_interfaces.srv")
@@ -92,7 +93,6 @@ def test_vlm_retargeter_applies_offset_only_after_robot_ik() -> None:
     node._target_box_quat_wxyz = quat_wxyz_from_rpy_deg(
         np.array([4.0, -6.0, 21.0])
     )
-    node._stand_before_place_height_m = 0.9
     node._target_box_orientation_offset_rpy_deg = np.array([7.0, 2.0, -13.0])
 
     ik_call: dict[str, np.ndarray] = {}
@@ -107,7 +107,7 @@ def test_vlm_retargeter_applies_offset_only_after_robot_ik() -> None:
 
     node._apply_box_ik = capture_ik
     payload = {
-        "object_position_xyz": np.zeros(3, dtype=np.float32),
+        "object_position_xyz": np.array([0.3, 0.0, source_height], dtype=np.float32),
         "object_quat_wxyz": np.array(
             [1.0, 0.0, 0.0, 0.0], dtype=np.float32
         ),
@@ -127,7 +127,8 @@ def test_vlm_retargeter_applies_offset_only_after_robot_ik() -> None:
     np.testing.assert_allclose(
         ik_call["quat_wxyz"], node._target_box_quat_wxyz, atol=0.0
     )
-    np.testing.assert_allclose(ik_call["center"], [1.2, -0.4, 0.9])
+    np.testing.assert_allclose(ik_call["center"], [1.2, -0.4, source_height])
+    np.testing.assert_allclose(payload["object_position_xyz"][2], source_height)
     expected_policy_quat = apply_target_box_orientation_offset(
         node._target_box_quat_wxyz,
         node._target_box_orientation_offset_rpy_deg,

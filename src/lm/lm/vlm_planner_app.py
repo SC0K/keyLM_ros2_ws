@@ -22,7 +22,11 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image as ImageMsg
 from std_msgs.msg import String
 
-from lm.box_config import SIM_TARGET_BOX_GEOMETRY, parse_box_size_xyz
+from lm.box_config import REAL_TARGET_BOX_GEOMETRY, SIM_TARGET_BOX_GEOMETRY, parse_box_size_xyz
+from lm.vlm_connection import (
+    DEFAULT_LOCAL_PORT, DEFAULT_SERVER, SERVER_PROFILES,
+    ssh_tunnel_command, tunnel_destination,
+)
 
 GOAL_BODY_LINKS = (
     (0, 1),
@@ -39,6 +43,14 @@ GOAL_BODY_LINKS = (
     (11, 12),
     (12, 13),
 )
+
+PLANNER_EXTRA_DEFAULTS = {
+    "robot_root_pose_topic": "",
+    "retarget_keyframe_service": "/retargeter/generate_keyframe",
+    "retargeted_keyframe_topic": "/retargeter/output_keyframe",
+    "stand_before_pick_distance_m": 0.4,
+    "default_box_forward_axis": SIM_TARGET_BOX_GEOMETRY.forward_axis,
+}
 
 try:
     from PIL import Image as PILImage
@@ -117,10 +129,10 @@ def _image_msg_to_rgb_array(msg: ImageMsg) -> np.ndarray:
 
 
 class PlannerAppNode(Node):
-    def __init__(self) -> None:
+    def __init__(self, real_robot: bool = False) -> None:
         super().__init__("vlm_planner_app_node")
 
-        self.declare_parameter("monitor_topic", "/g1_sim/monitor")
+        self.declare_parameter("monitor_topic", "/g1_hardware/monitor" if real_robot else "/g1_sim/monitor")
         self.declare_parameter("actual_box_pose_topic", "/actual_box_pose")
         self.declare_parameter("keyframe_visualization_topic", "/keyframe_target_poses")
         self.declare_parameter("tracking_error_topic", "/tracking_errors")
@@ -128,9 +140,13 @@ class PlannerAppNode(Node):
         self.declare_parameter("planner_status_topic", "/vlm_planner/status")
         self.declare_parameter("planner_decision_topic", "/vlm_planner/decision")
         self.declare_parameter("vlm_request_image_topic", "/vlm/request_image")
+        for name, default in PLANNER_EXTRA_DEFAULTS.items():
+            if name == "default_box_forward_axis" and real_robot:
+                default = REAL_TARGET_BOX_GEOMETRY.forward_axis
+            self.declare_parameter(name, default)
         self.declare_parameter(
             "box_size_xyz",
-            list(SIM_TARGET_BOX_GEOMETRY.size_xyz),
+            list((REAL_TARGET_BOX_GEOMETRY if real_robot else SIM_TARGET_BOX_GEOMETRY).size_xyz),
         )
 
         self._lock = threading.Lock()
@@ -318,6 +334,9 @@ class VLMPlannerApp:
     def __init__(self, node: PlannerAppNode, args: argparse.Namespace) -> None:
         self.node = node
         self.args = args
+        self.tunnel_host, self.tunnel_remote_port = tunnel_destination(
+            args.server, args.host, args.remote_port
+        )
         self.root = tk.Tk()
         self.root.title("VLM Planner")
         self.root.geometry("1600x950")
@@ -329,6 +348,8 @@ class VLMPlannerApp:
         self.bottom_status = tk.StringVar(value="Starting")
         self.tunnel_status = tk.StringVar(value="Tunnel: starting")
         self.planner_status = tk.StringVar(value="Planner: idle")
+        self.server_selection = tk.StringVar(value=args.server)
+        self._tunnel_check_id = None
         self.request_photo = None
         self._request_photo_cache_key = None
 
@@ -366,7 +387,17 @@ class VLMPlannerApp:
         bottom.grid(row=1, column=0, columnspan=3, sticky="ew")
         bottom.columnconfigure(1, weight=1)
 
-        ttk.Label(left, text="VLM Status", font=("TkDefaultFont", 13, "bold")).grid(row=0, column=0, sticky="w")
+        connection = ttk.Frame(left)
+        connection.grid(row=0, column=0, sticky="ew")
+        ttk.Label(connection, text="VLM server:").grid(row=0, column=0, sticky="w", padx=(0, 6))
+        self.server_selector = ttk.Combobox(
+            connection, textvariable=self.server_selection, values=list(SERVER_PROFILES),
+            state="readonly", width=8,
+        )
+        self.server_selector.grid(row=0, column=1, sticky="w")
+        self.server_selector.bind("<<ComboboxSelected>>", self._select_server)
+        ttk.Button(connection, text="Connect / retry", command=self._select_server).grid(
+            row=0, column=2, padx=(6, 0), sticky="w")
         ttk.Label(left, textvariable=self.tunnel_status).grid(row=1, column=0, sticky="w", pady=(8, 4))
         ttk.Label(left, textvariable=self.planner_status).grid(row=2, column=0, sticky="w", pady=(0, 8))
 
@@ -402,7 +433,7 @@ class VLMPlannerApp:
         ttk.Label(right, text="Task Command", font=("TkDefaultFont", 13, "bold")).grid(row=0, column=0, sticky="w")
         self.task_text = tk.Text(right, width=42, height=6, wrap="word")
         self.task_text.grid(row=1, column=0, sticky="ew", pady=(8, 8))
-        self.task_text.insert("1.0", "Pick up the box on the ground and place it 1m at the front.")
+        self.task_text.insert("1.0", self.args.task)
 
         buttons = ttk.Frame(right)
         buttons.grid(row=2, column=0, sticky="ew")
@@ -422,23 +453,66 @@ class VLMPlannerApp:
         ttk.Label(bottom, text="Status:").grid(row=0, column=0, sticky="w")
         ttk.Label(bottom, textvariable=self.bottom_status).grid(row=0, column=1, sticky="ew", padx=(8, 0))
 
+    def _select_server(self, _event=None) -> None:
+        selected = self.server_selection.get()
+        if selected not in SERVER_PROFILES:
+            self.server_selection.set(self.args.server)
+            return
+        reason = None
+        owned_running = self.tunnel_proc is not None and self.tunnel_proc.poll() is None
+        if self.proc is not None and self.proc.poll() is None:
+            reason = "Stop the planner before switching servers."
+        elif self.args.no_tunnel:
+            reason = "Tunnel management is disabled. Switch your external tunnel manually, or restart with manage_tunnel:=true."
+        elif not owned_running and _port_open("127.0.0.1", self.args.local_port):
+            reason = f"Port {self.args.local_port} belongs to an external connection. Stop that tunnel first, then select the server again."
+        if reason:
+            self.server_selection.set(self.args.server)
+            self.bottom_status.set(reason)
+            self._append_status("tunnel", reason)
+            return
+        if selected == self.args.server and owned_running:
+            self._append_status("tunnel", f"{selected.upper()} tunnel is already running.")
+            return
+        self._cancel_tunnel_check()
+        if owned_running:
+            self.tunnel_proc.terminate()
+            try:
+                self.tunnel_proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                self.tunnel_proc.kill()
+                self.tunnel_proc.wait(timeout=2.0)
+        self.tunnel_proc = None
+        if selected != self.args.server:
+            # An explicit GUI profile selection replaces CLI destination
+            # overrides, but retains the chosen SSH user and local port.
+            self.args.host = self.args.remote_port = None
+        self.args.server = selected
+        self.tunnel_host, self.tunnel_remote_port = tunnel_destination(
+            selected, self.args.host, self.args.remote_port)
+        self.bottom_status.set(f"Connecting to {selected.upper()}...")
+        self._start_tunnel()
+
+    def _cancel_tunnel_check(self) -> None:
+        if getattr(self, "_tunnel_check_id", None) is not None:
+            self.root.after_cancel(self._tunnel_check_id)
+            self._tunnel_check_id = None
+
     def _start_tunnel(self) -> None:
         if _port_open("127.0.0.1", self.args.local_port):
-            self.tunnel_status.set(f"Tunnel: port {self.args.local_port} already open")
-            self._append_status("tunnel", f"localhost:{self.args.local_port} already accepts connections")
+            self.tunnel_status.set(f"Tunnel: existing port {self.args.local_port} (server unverified)")
+            self._append_status(
+                "tunnel",
+                f"localhost:{self.args.local_port} already accepts connections; "
+                f"cannot verify it forwards to {self.tunnel_host}:{self.tunnel_remote_port}. "
+                "To switch servers, stop the existing tunnel and select the server in the GUI.",
+            )
             return
 
-        cmd = [
-            "ssh",
-            "-N",
-            "-o",
-            "ExitOnForwardFailure=yes",
-            "-o",
-            "ServerAliveInterval=30",
-            "-L",
-            f"{self.args.local_port}:localhost:{self.args.remote_port}",
-            f"{self.args.user}@{self.args.host}",
-        ]
+        cmd = ssh_tunnel_command(
+            self.args.server, user=self.args.user, local_port=self.args.local_port,
+            host=self.args.host, remote_port=self.args.remote_port,
+        )
         try:
             self.tunnel_proc = subprocess.Popen(
                 cmd,
@@ -454,21 +528,27 @@ class VLMPlannerApp:
             return
 
         self.tunnel_status.set(f"Tunnel: starting localhost:{self.args.local_port}")
-        self._append_status("tunnel", "started ssh tunnel command")
+        self._append_status(
+            "tunnel", f"Forwarding localhost:{self.args.local_port} to "
+            f"{self.args.user}@{self.tunnel_host}:localhost:{self.tunnel_remote_port}"
+        )
         self._read_stream(self.tunnel_proc.stderr, "tunnel")
-        self.root.after(1000, self._check_tunnel_started)
+        self._tunnel_check_id = self.root.after(1000, self._check_tunnel_started)
 
     def _check_tunnel_started(self) -> None:
+        self._tunnel_check_id = None
         if self.tunnel_proc is None:
             return
         if self.tunnel_proc.poll() is not None:
             self.tunnel_status.set(f"Tunnel: exited ({self.tunnel_proc.returncode})")
             return
         if _port_open("127.0.0.1", self.args.local_port):
-            self.tunnel_status.set(f"Tunnel: connected localhost:{self.args.local_port}")
+            self.tunnel_status.set(
+                f"Tunnel: localhost:{self.args.local_port} → {self.tunnel_host}:{self.tunnel_remote_port}"
+            )
         else:
             self.tunnel_status.set(f"Tunnel: process running, waiting on port {self.args.local_port}")
-            self.root.after(1000, self._check_tunnel_started)
+            self._tunnel_check_id = self.root.after(1000, self._check_tunnel_started)
 
     def start_planner(self) -> None:
         task = self.task_text.get("1.0", "end").strip()
@@ -490,6 +570,9 @@ class VLMPlannerApp:
             "--poll-period",
             str(self.args.poll_period),
         ]
+        # The GUI and the subprocess must observe the same robot/object. ROS
+        # parameters passed to the GUI are not inherited by a subprocess.
+        cmd.extend(planner_ros_arguments(self.node))
 
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
@@ -739,9 +822,20 @@ class VLMPlannerApp:
         widget.configure(state="disabled")
 
     def shutdown(self) -> None:
-        self.stop_planner()
-        if self.tunnel_proc is not None and self.tunnel_proc.poll() is None:
-            self.tunnel_proc.terminate()
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+        self._cancel_tunnel_check()
+        # Closing the app or Ctrl-C on the combined launch must also reap the
+        # planner and only the tunnel created by this GUI (never an external one).
+        for proc in (self.proc, self.tunnel_proc):
+            if proc is not None and proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=2.0)
         self.root.destroy()
 
     def run(self) -> None:
@@ -811,14 +905,27 @@ def _format_tracking_summary(snap: dict) -> str:
     return "\n".join(lines)
 
 
+def planner_ros_arguments(node: PlannerAppNode) -> list[str]:
+    args = ["--ros-args"]
+    for name in ("monitor_topic", "actual_box_pose_topic", "tracking_error_topic", "box_size_xyz",
+                 "retargeted_info_topic", *PLANNER_EXTRA_DEFAULTS):
+        args.extend(["-p", f"{name}:={json.dumps(node.get_parameter(name).value)}"])
+    return args
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="VLM planner GUI")
+    parser.add_argument("--task", default="Pick up the box on the ground and place it 1m at the front.",
+                        help="Initial task text; press Start to execute")
+    parser.add_argument("--real", action="store_true", help="Use real G1 monitor topics and real target box geometry")
     parser.add_argument("--service", default="/vlm/query", help="VLM query service used by spawned planner client")
     parser.add_argument("--poll-period", type=float, default=0.1, help="Readiness poll period for spawned planner client")
     parser.add_argument("--no-tunnel", action="store_true", help="Do not start the SSH tunnel")
-    parser.add_argument("--local-port", type=int, default=11434, help="Local tunnel port")
-    parser.add_argument("--remote-port", type=int, default=8001, help="Remote tunnel target port")
-    parser.add_argument("--host", default="case.inf.ethz.ch", help="SSH tunnel host")
+    parser.add_argument("--server", choices=SERVER_PROFILES, default=DEFAULT_SERVER,
+                        help="Tunnel profile: tars (default, remote 11434) or case (remote 8001)")
+    parser.add_argument("--local-port", type=int, default=DEFAULT_LOCAL_PORT, help="Local tunnel port")
+    parser.add_argument("--remote-port", type=int, default=None, help="Override the profile's remote port")
+    parser.add_argument("--host", default=None, help="Override the profile's SSH host")
     parser.add_argument("--user", default="sitchen", help="SSH tunnel user")
     return parser
 
@@ -830,7 +937,7 @@ def main(args: list[str] | None = None) -> None:
     parsed = build_arg_parser().parse_args(args=ros_filtered_args)
 
     rclpy.init(args=None)
-    node = PlannerAppNode()
+    node = PlannerAppNode(real_robot=parsed.real)
     executor = SingleThreadedExecutor()
     executor.add_node(node)
     spin_thread = threading.Thread(target=executor.spin, daemon=True)
@@ -840,6 +947,7 @@ def main(args: list[str] | None = None) -> None:
     try:
         app.run()
     finally:
+        app.shutdown()
         executor.shutdown()
         node.destroy_node()
         rclpy.shutdown()

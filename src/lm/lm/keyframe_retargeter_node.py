@@ -8,6 +8,8 @@ from pathlib import Path
 import mujoco  # type: ignore[import-not-found]
 import numpy as np
 import rclpy
+import yaml
+from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import PoseStamped
 from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.node import Node
@@ -28,10 +30,13 @@ from lm.keyframe_box_retarget import (
     BoxFrame,
     _default_robot_xml,
     _get_body_pos,
-    _pick_existing_default_ee,
+    grasp_body_names,
     _pick_existing_default_feet,
     retarget_qpos_for_box_grasp,
+    matched_box_rotation,
+    _yaw_from_matched_rotation,
 )
+from lm.generated_stand import POLICY_JOINT_NAMES, VLM_STANDING_LEAN_DEG, generated_stand_joint_delta
 from lm.keyframe_modes import MANIPULATION_KEYFRAMES
 
 _AXIS_TO_LOCAL_VEC = {
@@ -223,6 +228,10 @@ class KeyframeRetargeterNode(Node):
 
         self.declare_parameter("retarget_keyframe_service", "/retargeter/generate_keyframe")
         self.declare_parameter("library_dir", "")
+        self.declare_parameter("retarget_object_type", "box")
+        self.declare_parameter("retarget_ik_enabled", False)
+        self.declare_parameter("standing_config_file", "")
+        self.declare_parameter("standing_waist_pitch_deg", VLM_STANDING_LEAN_DEG)
         self.declare_parameter(
             "box_size_xyz",
             list(REAL_TARGET_BOX_GEOMETRY.size_xyz),
@@ -250,8 +259,6 @@ class KeyframeRetargeterNode(Node):
             ),
         )
         self.declare_parameter("stand_before_pick_offset_m", 0.2)
-        self.declare_parameter("stand_after_pick_height_m", 0.9)
-        self.declare_parameter("stand_before_place_height_m", 0.9)
         # Retained as accepted legacy parameters while the shared solver uses
         # explicit fixed-foot constraints below.
         self.declare_parameter("foot_motion_penalty_weight", 0.1)
@@ -263,6 +270,19 @@ class KeyframeRetargeterNode(Node):
         self.declare_parameter("robot_xml", "")
 
         retarget_keyframe_service = str(self.get_parameter("retarget_keyframe_service").value)
+        self._retarget_object_type = str(self.get_parameter("retarget_object_type").value)
+        self._retarget_ik_enabled = bool(self.get_parameter("retarget_ik_enabled").value)
+        standing_config = str(self.get_parameter("standing_config_file").value).strip()
+        if not standing_config:
+            standing_config = str(Path(get_package_share_directory("crl_g1_goalcontroller_python"))
+                                  / "config" / "g1_keyframe_tracking_obj.yaml")
+        with open(standing_config, encoding="utf-8") as stream:
+            config = yaml.safe_load(stream)
+        self._standing_default_angles = np.asarray(config["default_angles"], dtype=np.float32)
+        if self._standing_default_angles.shape != (len(POLICY_JOINT_NAMES),):
+            raise ValueError("Standing config must contain 29 default_angles in policy order")
+        self._standing_joint_delta = generated_stand_joint_delta(
+            math.radians(float(self.get_parameter("standing_waist_pitch_deg").value)))
         self._box_size_xyz = parse_box_size_xyz(self.get_parameter("box_size_xyz").value)
         self._source_box_size_xyz = parse_box_size_xyz(
             self.get_parameter("source_box_size_xyz").value
@@ -287,8 +307,6 @@ class KeyframeRetargeterNode(Node):
             )
         )
         self._stand_before_pick_offset_m = float(self.get_parameter("stand_before_pick_offset_m").value)
-        self._stand_after_pick_height_m = float(self.get_parameter("stand_after_pick_height_m").value)
-        self._stand_before_place_height_m = float(self.get_parameter("stand_before_place_height_m").value)
         self._foot_motion_penalty_weight = float(self.get_parameter("foot_motion_penalty_weight").value)
         self._ee_root_penalty_weight = float(self.get_parameter("ee_root_penalty_weight").value)
         self._ik_max_residual_m = float(self.get_parameter("ik_max_residual_m").value)
@@ -305,7 +323,7 @@ class KeyframeRetargeterNode(Node):
             robot_name = str(self.get_parameter("robot").value)
             self._ik_model = mujoco.MjModel.from_xml_path(str(_default_robot_xml(robot_name)))
         self._ik_data = mujoco.MjData(self._ik_model)
-        ee_names = _pick_existing_default_ee(self._ik_model)
+        ee_names = grasp_body_names(self._ik_model, self._retarget_object_type)
         self._ik_ee_body_ids = [
             mujoco.mj_name2id(self._ik_model, mujoco.mjtObj.mjOBJ_BODY, name) for name in ee_names
         ]
@@ -322,9 +340,13 @@ class KeyframeRetargeterNode(Node):
         # The semantic source face belongs to the reference motion, not to an
         # individual carried/placed posture. Infer it once from the canonical
         # pickup frame and retain it for the entire task.
-        self._source_box_forward_axis = self._infer_library_source_forward_axis(
-            self._source_box_forward_axis
-        )
+        if self._retarget_object_type == "bucket":
+            self._source_box_forward_axis = self._box_hold_forward_axis = "x"
+            self._source_box_up_axis = self._box_hold_up_axis = "z"
+        else:
+            self._source_box_forward_axis = self._infer_library_source_forward_axis(
+                self._source_box_forward_axis
+            )
 
         self._object_to_manipulate = True
         self._current_box_center = np.array([10.0, 10.0, self._box_size_xyz[2] * 0.5], dtype=np.float64)
@@ -403,8 +425,10 @@ class KeyframeRetargeterNode(Node):
         if keyframe_name in MANIPULATION_KEYFRAMES:
             self._object_to_manipulate = True
         payload = self._load_payload(keyframe_name)
-        if keyframe_name == "stand_after_place":
-            mode = self._retarget_stand_after_place(payload)
+        if keyframe_name in ("stand_before_pick", "stand_after_place"):
+            mode = self._generate_stationary_stand(keyframe_name, payload)
+        elif self._object_to_manipulate and not self._retarget_ik_enabled:
+            mode = self._retarget_planar(keyframe_name, payload)
         elif self._object_to_manipulate:
             mode = self._retarget_for_box_task(keyframe_name, payload)
         else:
@@ -420,6 +444,10 @@ class KeyframeRetargeterNode(Node):
                 "input_keyframe": keyframe_name,
                 "serialized_npz_bytes": len(payload_bytes),
                 "mode": mode,
+                "retarget_ik_enabled": self._retarget_ik_enabled,
+                "authored_motion_height_preserved": mode == "rigid_xy_yaw_preserve_joints_and_z",
+                "library_root_height_preserved": True,
+                "library_object_height_preserved": bool(self._object_to_manipulate),
                 "object_to_manipulate": bool(self._object_to_manipulate),
                 "current_box_position_xyz": self._current_box_center.tolist(),
                 "target_box_position_xyz": self._target_box_center.tolist(),
@@ -437,6 +465,58 @@ class KeyframeRetargeterNode(Node):
             f"(service response, {mode}, object_to_manipulate={self._object_to_manipulate})"
         )
         return payload_bytes, info_data
+
+    def _generate_stationary_stand(self, name: str, payload: dict[str, np.ndarray]) -> str:
+        """Test-style default joints + lean, but retain this library frame's root Z."""
+        positions, _ = self._extract_body_arrays(payload)
+        names = [str(n) for n in payload["body_names"]]
+        qpos = self._ik_model.qpos0.copy()
+        qpos[:2] = self._target_root_center[:2]
+        qpos[2] = positions[names.index("pelvis"), 2]
+        qpos[3:7] = _yaw_to_quat_wxyz(_yaw_from_quat_wxyz(self._target_root_quat_wxyz))
+        angles = self._standing_default_angles + self._standing_joint_delta
+        for joint_name, value in zip(POLICY_JOINT_NAMES, angles):
+            qpos[self._ik_model.joint(joint_name).qposadr[0]] = value
+        self._write_ik_result_to_payload(payload, qpos)  # FK only, no IK solve.
+        center = (self._current_box_center if name == "stand_before_pick" else self._target_box_center).copy()
+        quat = self._current_box_quat_wxyz if name == "stand_before_pick" else self._target_box_quat_wxyz
+        center[2] = np.asarray(payload["object_position_xyz"]).reshape(-1, 3)[0, 2]
+        self._write_policy_object_pose(payload, center, quat)
+        return "generated_stationary_stand"
+
+    def _retarget_planar(self, name: str, payload: dict[str, np.ndarray]) -> str:
+        """Align semantic forward axes without changing robot joints or heights."""
+        source = np.asarray(payload["object_position_xyz"], dtype=np.float64).reshape(3)
+        source_quat, _, _ = self._source_object_quat(payload)
+        target = self._current_box_center if name in _PICK_POSE_KEYFRAMES else self._target_box_center
+        target_quat = self._current_box_quat_wxyz if name in _PICK_POSE_KEYFRAMES else self._target_box_quat_wxyz
+        sf, su, tf, tu = (self._source_box_forward_axis, self._source_box_up_axis,
+                          self._box_hold_forward_axis, self._box_hold_up_axis)
+        if self._retarget_object_type == "bucket":
+            sf = tf = "x"
+            su = tu = "z"
+        yaw = (_yaw_from_matched_rotation(matched_box_rotation(target_quat, tf, tu))
+               - _yaw_from_matched_rotation(matched_box_rotation(source_quat, sf, su)))
+        delta_q = _yaw_to_quat_wxyz(yaw)
+        rotation = _quat_wxyz_to_rotmat(delta_q)
+        positions, quaternions = self._extract_body_arrays(payload)
+        old_z = positions[:, 2].copy()
+        positions = (positions - source) @ rotation.T + source
+        positions[:, :2] += target[:2] - source[:2]
+        positions[:, 2] = old_z
+        quaternions = np.vstack([_quat_wxyz_multiply(delta_q, q) for q in quaternions])
+        self._write_body_arrays(payload, positions, quaternions)
+        object_pos = source.copy()
+        object_pos[:2] = target[:2]
+        # Axis matching rotates the robot's approach, but the object goal must
+        # use the physical target frame, just as in the IK path. A yaw-rotated
+        # source quaternion still carries the source forward/up convention.
+        self._write_policy_object_pose(payload, object_pos, target_quat)
+        # World-frame velocity metadata rotates with the same rigid transform.
+        for key in ("body_linear_velocities", "body_angular_velocities"):
+            if key in payload:
+                payload[key] = (np.asarray(payload[key]) @ rotation.T).astype(payload[key].dtype)
+        return "rigid_xy_yaw_preserve_joints_and_z"
 
     def _on_retarget_keyframe_request(
         self,
@@ -557,6 +637,8 @@ class KeyframeRetargeterNode(Node):
         body_positions, body_rotations = self._extract_body_arrays(payload)
 
         root_center_old = body_positions[pelvis_idx].copy()
+        root_center_new = np.asarray(root_center_new, dtype=np.float64).copy()
+        root_center_new[2] = root_center_old[2]
         root_quat_old = body_rotations[pelvis_idx].copy()
         yaw_old = _yaw_from_quat_wxyz(root_quat_old)
         yaw_new = _yaw_from_quat_wxyz(root_quat_new)
@@ -707,6 +789,8 @@ class KeyframeRetargeterNode(Node):
             target_up_axis=self._box_hold_up_axis,
             fixed_foot_weight=self._ik_foot_constraint_weight,
             max_foot_residual_m=self._ik_max_foot_residual_m,
+            object_type=self._retarget_object_type,
+            preserve_root_height=True,
         )
         self.get_logger().info(
             "Grounded matched box frames | src forward=%s up=%s size=%s | "
@@ -799,22 +883,27 @@ class KeyframeRetargeterNode(Node):
         return buf.getvalue()
 
     def _retarget_for_box_task(self, keyframe_name: str, payload: dict[str, np.ndarray]) -> str:
+        if keyframe_name in ("stand_before_pick", "stand_after_place"):
+            return self._generate_stationary_stand(keyframe_name, payload)
+        source_height = float(np.asarray(payload["object_position_xyz"]).reshape(-1, 3)[0, 2])
+        if keyframe_name in ("crouch_to_pick", "stand_after_pick"):
+            current_target = self._current_box_center.copy()
+            current_target[2] = source_height
         if keyframe_name == "crouch_to_pick":
             self._apply_box_ik(
                 payload,
-                self._current_box_center,
+                current_target,
                 self._current_box_quat_wxyz,
             )
             self._write_policy_object_pose(
                 payload,
-                self._current_box_center,
+                current_target,
                 self._current_box_quat_wxyz,
             )
             return "ik_to_current_box_pick"
 
         if keyframe_name == "stand_after_pick":
-            lifted_box_center = self._current_box_center.copy()
-            lifted_box_center[2] = self._stand_after_pick_height_m
+            lifted_box_center = current_target
             self._apply_box_ik(
                 payload,
                 lifted_box_center,
@@ -827,23 +916,10 @@ class KeyframeRetargeterNode(Node):
             )
             return "ik_to_lifted_box_stand_after_pick"
 
-        if keyframe_name == "stand_before_pick":
-            self._apply_root_pose(
-                payload,
-                self._target_root_center,
-                self._target_root_quat_wxyz,
-            )
-            if self._has_current_box_pose:
-                self._write_policy_object_pose(
-                    payload,
-                    self._current_box_center,
-                    self._current_box_quat_wxyz,
-                )
-            return "stand_before_pick_root_from_vlm"
-
         if keyframe_name == "stand_before_place":
             above_target = self._target_box_center.copy()
-            above_target[2] = self._stand_before_place_height_m
+            # Retain the carry height authored in this keyframe, even with IK.
+            above_target[2] = source_height
             self._apply_box_ik(
                 payload,
                 above_target,
@@ -858,7 +934,7 @@ class KeyframeRetargeterNode(Node):
 
         if keyframe_name == "crouch_to_place":
             place_target = self._target_box_center.copy()
-            place_target[2] = 0.5 * self._box_size_xyz[2]
+            place_target[2] = source_height
             self._apply_box_ik(
                 payload,
                 place_target,
@@ -870,9 +946,6 @@ class KeyframeRetargeterNode(Node):
                 self._target_box_quat_wxyz,
             )
             return "ik_to_box_on_ground_at_place_target"
-
-        if keyframe_name == "stand_after_place":
-            return self._retarget_stand_after_place(payload)
 
         return "unsupported_keyframe_no_change"
 
@@ -892,22 +965,17 @@ class KeyframeRetargeterNode(Node):
         self,
         payload: dict[str, np.ndarray],
     ) -> str:
-        self._apply_root_pose(
-            payload,
-            self._target_root_center,
-            self._target_root_quat_wxyz,
-        )
-        placed_box_center = self._target_box_center.copy()
-        placed_box_center[2] = 0.5 * self._box_size_xyz[2]
-        self._write_policy_object_pose(
-            payload,
-            placed_box_center,
-            self._target_box_quat_wxyz,
-        )
-        return "stand_after_place_current_root_with_object"
+        return self._generate_stationary_stand("stand_after_place", payload)
 
     def _retarget_root_only(self, payload: dict[str, np.ndarray]) -> str:
-        self._apply_root_pose(payload, self._target_root_center, self._target_root_quat_wxyz)
+        target_root = self._target_root_center.copy()
+        body_positions, _ = self._extract_body_arrays(payload)
+        names = [str(name) for name in payload["body_names"]]
+        target_root[2] = body_positions[names.index("pelvis"), 2]
+        self._apply_root_pose(payload, target_root, self._target_root_quat_wxyz)
+        transformed, rotations = self._extract_body_arrays(payload)
+        transformed[:, 2] = body_positions[:, 2]
+        self._write_body_arrays(payload, transformed, rotations)
         self._zero_object_targets(payload)
         return "root_only_retarget"
 

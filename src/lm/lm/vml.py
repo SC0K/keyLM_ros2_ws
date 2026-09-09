@@ -5,6 +5,7 @@ import json
 import math
 import sys
 import time
+from io import BytesIO
 
 import numpy as np
 import rclpy
@@ -35,6 +36,20 @@ _AXIS_TO_LOCAL_VEC = {
 _GLOBAL_X_WORLD = np.array([1.0, 0.0, 0.0], dtype=np.float64)
 _GLOBAL_X_YAW_QUAT_WXYZ = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
 _PICK_POSE_KEYFRAMES = frozenset({"stand_before_pick", "crouch_to_pick", "stand_after_pick"})
+
+
+def published_goal_targets(data) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Read success targets from the exact payload sent to the policy, not guesses."""
+    with np.load(BytesIO(bytes(data)), allow_pickle=True) as payload:
+        names = [str(name) for name in payload["body_names"]]
+        pelvis = names.index("pelvis")
+        root = np.asarray(payload["body_positions"], dtype=np.float64).reshape(-1, len(names), 3)[0, pelvis].copy()
+        root_quat = np.asarray(payload["body_rotations"], dtype=np.float64).reshape(-1, len(names), 4)[0, pelvis].copy()
+        obj = np.asarray(payload["object_position_xyz"], dtype=np.float64).reshape(-1, 3)[0].copy()
+        obj_quat = np.asarray(payload["object_quat_wxyz"], dtype=np.float64).reshape(-1, 4)[0].copy()
+    if not all(np.all(np.isfinite(v)) for v in (root, root_quat, obj, obj_quat)):
+        raise ValueError("Retargeted goal contains non-finite poses")
+    return obj, obj_quat, root, root_quat
 
 
 def _quat_wxyz_to_rotmat(q: np.ndarray) -> np.ndarray:
@@ -158,10 +173,9 @@ class VLMClientNode(Node):
             descriptor=ParameterDescriptor(dynamic_typing=True),
         )
         self.declare_parameter("default_place_distance_m", 1.0)
-        self.declare_parameter("stand_before_pick_offset_m", 0.3)
+        # XY root-to-box-center distance, not clearance from the box surface.
+        self.declare_parameter("stand_before_pick_distance_m", 0.4)
         self.declare_parameter("pick_max_horizontal_distance_m", 0.45)
-        self.declare_parameter("stand_after_pick_height_m", 1.0)
-        self.declare_parameter("stand_before_place_height_m", 1.0)
         self.declare_parameter("min_stand_root_height_m", 0.78)
         self.declare_parameter("default_target_root_center", [0.0, 0.0, 0.78])  # TODO: find the correct target root pose for root mode (navifation)
         self.declare_parameter("default_target_root_quat_wxyz", [ 1.0, 0.0, 0.0,  0.0])
@@ -211,6 +225,7 @@ class VLMClientNode(Node):
         self._last_action_name: str | None = None
         self._last_action_sent_time: float | None = None
         self._last_action_success: bool | None = None
+        self._action_success_checks: dict = {}
         self._last_retargeted_info: str | None = None
         self._last_target_box_center: np.ndarray | None = None
         self._last_target_box_quat_wxyz: np.ndarray | None = None
@@ -221,12 +236,12 @@ class VLMClientNode(Node):
         self._task_target_initialized_time: float | None = None
         self._last_object_to_manipulate = True
         self._default_place_distance_m = float(self.get_parameter("default_place_distance_m").value)
-        self._stand_before_pick_offset_m = float(self.get_parameter("stand_before_pick_offset_m").value)
+        self._stand_before_pick_distance_m = float(self.get_parameter("stand_before_pick_distance_m").value)
+        if not math.isfinite(self._stand_before_pick_distance_m) or self._stand_before_pick_distance_m <= 0.0:
+            raise ValueError("stand_before_pick_distance_m must be finite and positive")
         self._pick_max_horizontal_distance_m = float(
             self.get_parameter("pick_max_horizontal_distance_m").value
         )
-        self._stand_after_pick_height_m = float(self.get_parameter("stand_after_pick_height_m").value)
-        self._stand_before_place_height_m = float(self.get_parameter("stand_before_place_height_m").value)
         self._min_stand_root_height_m = float(self.get_parameter("min_stand_root_height_m").value)
         self._stationary_hold_sec = float(self.get_parameter("stationary_hold_sec").value)
         self._min_action_duration_sec = float(self.get_parameter("min_action_duration_sec").value)
@@ -309,6 +324,7 @@ class VLMClientNode(Node):
             "stamp_monotonic": time.monotonic(),
             "state": state,
             "message": message,
+            "action_success_checks": getattr(self, "_action_success_checks", {}),
         }
         payload.update(extra)
         msg = String()
@@ -542,7 +558,7 @@ class VLMClientNode(Node):
         return True
 
     def _stand_before_pick_root_pose(self) -> tuple[np.ndarray, np.ndarray]:
-        """Return the nearest-edge root pose used to approach the starting box."""
+        """Face the nearest box side at the configured XY distance from its center."""
         if not self._has_actual_box_pose:
             raise RuntimeError("Cannot compute a pickup approach without an actual box pose")
         if not (self._has_robot_root_pose or self._has_monitor):
@@ -569,7 +585,7 @@ class VLMClientNode(Node):
         else:
             outward = outward / outward_norm
 
-        root_xy = edge_center[:2] + self._stand_before_pick_offset_m * outward
+        root_xy = start_box_center[:2] + self._stand_before_pick_distance_m * outward
         root_z_candidates = [
             float(self._default_target_root_center[2]),
             self._min_stand_root_height_m,
@@ -696,29 +712,6 @@ class VLMClientNode(Node):
         quat_error = _quat_angle_error(self._current_box_quat_wxyz, self._task_target_box_quat_wxyz)
         return pos_error, quat_error
 
-    def _expected_object_target_for_action(
-        self,
-        action: str,
-        place_target_center: np.ndarray,
-        place_target_quat: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        start_center, start_quat = self._fixed_start_box_pose()
-        if action in ("stand_before_pick", "crouch_to_pick"):
-            return start_center, start_quat
-        if action in ("stand_after_pick",):
-            target = start_center.copy()
-            target[2] = self._stand_after_pick_height_m
-            return target, start_quat
-        if action == "stand_before_place":
-            target = np.asarray(place_target_center, dtype=np.float64).copy()
-            target[2] = self._stand_before_place_height_m
-            return target, np.asarray(place_target_quat, dtype=np.float64).copy()
-        if action in ("crouch_to_place", "stand_after_place"):
-            target = np.asarray(place_target_center, dtype=np.float64).copy()
-            target[2] = 0.5 * float(self._box_size_xyz[2])
-            return target, np.asarray(place_target_quat, dtype=np.float64).copy()
-        return self._current_box_center.copy(), self._current_box_quat_wxyz.copy()
-
     def _fixed_start_box_pose(self) -> tuple[np.ndarray, np.ndarray]:
         center = (
             self._starting_box_center
@@ -840,13 +833,17 @@ class VLMClientNode(Node):
         root_orientation_error = self._tracking_metric("root_orientation_error_rad")
         object_position_error, _object_orientation_error = self._object_error_to_last_target()
 
-        checks = [
-            mean_body_error is not None and mean_body_error <= self._mean_body_success_threshold_m,
-            root_position_error is not None and root_position_error <= self._root_position_success_threshold_m,
-            root_orientation_error is not None and root_orientation_error <= self._root_orientation_success_threshold_rad,
-            object_position_error is not None and object_position_error <= self._object_position_success_threshold_m,
-        ]
-        generic_success = bool(all(checks))
+        metrics = {
+            "mean_body_position_error_m": (mean_body_error, self._mean_body_success_threshold_m),
+            "root_position_error_m": (root_position_error, self._root_position_success_threshold_m),
+            "root_orientation_error_rad": (root_orientation_error, self._root_orientation_success_threshold_rad),
+            "object_position_error_m": (object_position_error, self._object_position_success_threshold_m),
+        }
+        self._action_success_checks = {
+            name: {"value": value, "threshold": threshold, "passed": value is not None and value <= threshold}
+            for name, (value, threshold) in metrics.items()
+        }
+        generic_success = all(check["passed"] for check in self._action_success_checks.values())
         distance_context = self._distance_context()
         stand_before_pick_reach_success = bool(
             self._last_action_name == "stand_before_pick"
@@ -896,6 +893,7 @@ class VLMClientNode(Node):
                 "root_orientation_threshold_rad": self._root_orientation_success_threshold_rad,
             },
             "tracking_errors": self._tracking_errors or {},
+            "action_success_checks": self._action_success_checks,
             "distance_context": self._distance_context(),
             "success_thresholds": {
                 "mean_body_position_error_m": self._mean_body_success_threshold_m,
@@ -924,7 +922,15 @@ class VLMClientNode(Node):
                 "For failed pick actions such as crouch_to_pick or stand_after_pick, recover with stand_before_pick first, then retry crouch_to_pick. "
                 "For failed place actions such as stand_before_place or crouch_to_place, retry the failed place keyframe if still safe, or recover with stand_before_place before retrying crouch_to_place. "
                 "For failed final standby, retry stand_after_place. "
-                "Set task_completion true only when measured_task_completion is true and the selected next keyframe leaves the robot in the final required task state. "
+                "Required placement order: stand_before_place -> crouch_to_place -> stand_after_place. "
+                "stand_before_place holds the object above the destination; it does not place or release it. "
+                "Never select stand_after_place directly after stand_before_place, even if measured_task_completion is true. "
+                "On successful stand_before_place select crouch_to_place; on failure retry/recover without skipping placement. "
+                "measured_task_completion is only a position-tolerance check, not evidence of placement or release. "
+                "Keep task_completion false when first selecting stand_after_place after crouch_to_place. "
+                "Set task_completion true only after previous_action is stand_after_place, previous_action_finished and previous_action_success are true, "
+                "measured_task_completion is true, and the image confirms final standby with the object supported at the destination and no longer held. "
+                "Do not predict completion of the newly selected action: task_completion true stops the planner immediately. "
                 "The VLM response field object_in_manipulation is the same effective flag as object_to_manipulate: true means both retargeting and policy should consider the object. "
                 "Set it true for all six pick-and-place keyframes, including stand_before_pick and final stand_after_place, so every policy goal receives the measured object pose in the robot base frame."
             ),
@@ -1002,19 +1008,11 @@ class VLMClientNode(Node):
         elif response.next_keyframe == "stand_after_place":
             if self._has_robot_root_pose or self._has_monitor:
                 target_root_center = self._current_robot_center.copy()
-                target_root_quat = _GLOBAL_X_YAW_QUAT_WXYZ.copy()
+                target_root_quat = self._current_robot_quat_wxyz.copy()
             else:
                 self.get_logger().warn(
                     "No current robot root pose available for stand_after_place; using default target root pose."
                 )
-
-        action_object_target_center, action_object_target_quat = (
-            self._expected_object_target_for_action(
-                response.next_keyframe,
-                target_box_center,
-                target_box_quat,
-            )
-        )
 
         target_root_pose_msg = self._pose_stamped_from(
             center=target_root_center,
@@ -1041,6 +1039,14 @@ class VLMClientNode(Node):
             )
             return False
 
+        try:
+            (action_object_target_center, action_object_target_quat,
+             target_root_center, target_root_quat) = published_goal_targets(retarget_response.retargeted_keyframe)
+        except (ValueError, KeyError, OSError) as exc:
+            self.get_logger().error(f"Invalid retargeted goal: {exc}")
+            self.publish_status("retargeter_failed", f"Invalid retargeted goal: {exc}")
+            return False
+
         keyframe_msg = UInt8MultiArray()
         keyframe_msg.data = list(retarget_response.retargeted_keyframe)
         self._retargeted_keyframe_pub.publish(keyframe_msg)
@@ -1053,6 +1059,7 @@ class VLMClientNode(Node):
         self._last_action_name = response.next_keyframe
         self._last_action_sent_time = time.monotonic()
         self._last_action_success = None
+        self._action_success_checks = {}
         self._last_retargeted_info = retarget_response.retargeted_info or None
         self._last_target_box_center = action_object_target_center.copy()
         self._last_target_box_quat_wxyz = action_object_target_quat.copy()

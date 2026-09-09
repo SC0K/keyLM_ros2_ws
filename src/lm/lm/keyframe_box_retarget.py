@@ -511,17 +511,26 @@ def retarget_qpos_for_box_grasp(
     ik_pos_tol: float = 1e-4,
     fixed_foot_weight: float = 6.0,
     max_foot_residual_m: float = 1e-3,
+    object_type: str = "box",
+    preserve_root_height: bool = False,
 ) -> BoxGraspRetargetResult:
-    """Retarget a two-hand box grasp while preserving grounded foot poses.
+    """Retarget a box or bucket grasp while preserving grounded foot poses.
+
+    Boxes scale both hand targets. Buckets rigidly transform only the right
+    hand, ignoring dimensions and semantic box-axis remapping.
 
     The selected physical forward/up axes first define canonical semantic box
     frames.  Their dimensions are reordered into ``[forward, side, up]`` and
     their forward directions are projected to yaw-only frames before mapping
     the robot root and normalized hand coordinates.  This keeps the robot
     upright even when the source mesh frame has roll or pitch.  Both feet are
-    constrained in XYZ during IK; base Z remains active so the leg chain may
-    compensate without moving the contacts through the floor.
+    constrained in XYZ during IK; by default base Z remains active so the leg
+    chain may compensate without moving contacts through the floor. With
+    ``preserve_root_height=True``, base Z stays fixed at the source height.
     """
+    if object_type not in ("box", "bucket"):
+        raise ValueError("object_type must be 'box' or 'bucket'")
+    bucket = object_type == "bucket"
     q0 = np.asarray(qpos, dtype=np.float64).reshape(-1).copy()
     if q0.shape != (model.nq,):
         raise ValueError(f"Expected qpos shape ({model.nq},), got {q0.shape}")
@@ -548,17 +557,26 @@ def retarget_qpos_for_box_grasp(
 
     hand_ids = [int(body_id) for body_id in hand_body_ids]
     foot_ids = [int(body_id) for body_id in foot_body_ids]
-    if len(hand_ids) != 2:
-        raise ValueError(f"Expected exactly two hand body IDs, got {len(hand_ids)}")
+    expected_hands = 1 if bucket else 2
+    if len(hand_ids) != expected_hands:
+        raise ValueError(f"Expected {expected_hands} hand body IDs for {object_type}, got {len(hand_ids)}")
     if len(foot_ids) != 2:
         raise ValueError(f"Expected exactly two foot body IDs, got {len(foot_ids)}")
-    if len(set(hand_ids)) != 2 or len(set(foot_ids)) != 2:
+    if len(set(hand_ids)) != expected_hands or len(set(foot_ids)) != 2:
         raise ValueError("Hand and foot body IDs must each be distinct")
     if set(hand_ids) & set(foot_ids):
         raise ValueError("Hand and foot body IDs must not overlap")
     for body_id in hand_ids + foot_ids:
         if body_id < 0 or body_id >= model.nbody:
             raise ValueError(f"Invalid MuJoCo body ID {body_id}")
+    if bucket and not model.body(hand_ids[0]).name.startswith("right_"):
+        raise ValueError("Bucket retargeting requires a right-hand body")
+
+    # The same bucket mesh/origin is used in reference and deployment. Do not
+    # reinterpret it using the box's source +Y/-Z and target +X/+Z conventions.
+    if bucket:
+        source_forward_axis = target_forward_axis = "x"
+        source_up_axis = target_up_axis = "z"
 
     source_center = np.asarray(source_box.center, dtype=np.float64).reshape(3)
     target_center = np.asarray(target_box.center, dtype=np.float64).reshape(3)
@@ -609,26 +627,32 @@ def retarget_qpos_for_box_grasp(
     mujoco.mj_forward(model, data)
     hand_positions_before = np.vstack([_get_body_pos(data, body_id) for body_id in hand_ids])
     foot_positions_before = np.vstack([_get_body_pos(data, body_id) for body_id in foot_ids])
-    hand_targets = infer_scaled_targets(
-        source_ground_box,
-        target_ground_box,
-        hand_positions_before,
-    )
+    if bucket:
+        # Rigid physical-object transform, without size normalization or face
+        # projection. Preserve the authored right-hand offset to the handle.
+        rotation_delta = target_matched_rot @ source_matched_rot.T
+        hand_targets = (hand_positions_before - source_center) @ rotation_delta.T + target_center
+    else:
+        hand_targets = infer_scaled_targets(
+            source_ground_box, target_ground_box, hand_positions_before,
+        )
 
     # Retargeted payloads may be passed through the shared path again.  Keep an
     # exact no-op when their grounded semantic box geometry already matches;
     # rerunning numerical IK would otherwise introduce small joint drift.
     same_ground_geometry = (
         np.allclose(source_ground_box.center, target_ground_box.center, rtol=0.0, atol=1e-12)
-        and np.allclose(source_ground_box.size, target_ground_box.size, rtol=0.0, atol=1e-12)
+        and (bucket or np.allclose(source_ground_box.size, target_ground_box.size, rtol=0.0, atol=1e-12))
         and abs(yaw_delta) <= 1e-12
+        and (not bucket or np.allclose(source_matched_rot, target_matched_rot, rtol=0.0, atol=1e-12))
     )
     if same_ground_geometry:
-        _, root_corner_code = map_points_by_closest_box_corner(
-            source_ground_box,
-            target_ground_box,
-            q0[0:3],
-        )
+        if bucket:
+            root_corner_code = np.zeros(3, dtype=np.float64)
+        else:
+            _, root_corner_code = map_points_by_closest_box_corner(
+                source_ground_box, target_ground_box, q0[0:3],
+            )
         return BoxGraspRetargetResult(
             qpos=q0.copy(),
             hand_targets=hand_positions_before.copy(),
@@ -648,11 +672,15 @@ def retarget_qpos_for_box_grasp(
         )
 
     q_init = q0.copy()
-    mapped_root, root_corner_code = map_points_by_closest_box_corner(
-        source_ground_box,
-        target_ground_box,
-        q0[0:3],
-    )
+    if bucket:
+        # Keep support contacts grounded; no box-corner/dimension offset.
+        yaw_rotation = _quat_wxyz_to_rotmat(_yaw_quat_wxyz(yaw_delta))
+        mapped_root = yaw_rotation @ (q0[0:3] - source_center) + target_center
+        root_corner_code = np.zeros(3, dtype=np.float64)
+    else:
+        mapped_root, root_corner_code = map_points_by_closest_box_corner(
+            source_ground_box, target_ground_box, q0[0:3],
+        )
     q_init[0:2] = mapped_root[0:2]
     q_init[2] = q0[2]
     q_init[3:7] = _quat_wxyz_normalize(
@@ -677,7 +705,7 @@ def retarget_qpos_for_box_grasp(
         fixed_body_targets=foot_targets,
         fixed_body_mask=foot_mask,
         fixed_body_weight=fixed_foot_weight,
-        active_base_dofs=(2,),
+        active_base_dofs=() if preserve_root_height else (2,),
         max_iters=ik_max_iters,
         pos_tol=ik_pos_tol,
         # The generic solver's stronger posture regularization can leave
@@ -776,6 +804,14 @@ def _pick_existing_default_ee(model: mujoco.MjModel) -> list[str]:
         "Could not infer end-effector bodies. Pass --ee-bodies explicitly. "
         f"Available bodies include: {sorted(list(model_names))[:20]} ..."
     )
+
+
+def grasp_body_names(model: mujoco.MjModel, object_type: str) -> list[str]:
+    """Select both hands for boxes and only the right hand for the fixed bucket."""
+    if object_type not in ("box", "bucket"):
+        raise ValueError("retarget_object_type must be 'box' or 'bucket'")
+    names = _pick_existing_default_ee(model)
+    return names[1:] if object_type == "bucket" else names
 
 
 def _pick_existing_default_feet(model: mujoco.MjModel) -> list[str] | None:

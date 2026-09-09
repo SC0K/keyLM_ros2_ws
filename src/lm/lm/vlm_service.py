@@ -11,10 +11,11 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 
-from ollama import chat
+from ollama import Client
 from pydantic import BaseModel, ValidationError
 
 from lm.keyframe_modes import MANIPULATION_KEYFRAMES
+from lm.vlm_connection import DEFAULT_MODEL, DEFAULT_OLLAMA_HOST
 from lm_interfaces.srv import VLMQuery
 
 try:
@@ -24,8 +25,6 @@ except ImportError:
     cv2 = None
     CvBridge = None
 
-
-MODEL_NAME = "qwen3.6:27b"
 
 AllowedKeyframe = Literal[
     "crouch_to_pick",
@@ -44,43 +43,114 @@ class KeyframeDecision(BaseModel):
 
 
 SYSTEM_PROMPT = """
-You are a high-level robot planner.
-Your job is to choose exactly one next action keyframe from the allowed motion library.
-A image of the current scene is provided to help you understand the environment, but you must choose from the allowed keyframes.
-You need to decide if the task is completed after executing the chosen keyframe, and whether the selected keyframe should use the object-aware retargeting and policy mask.
-The user prompt includes planner_context as JSON. Treat that JSON as measured execution state.
-The planner_context.previous_action field is "none" on the first request; otherwise it is the keyframe selected by the previous VLM response.
-The planner_context.previous_action_finished field is true only after the robot and object have been stationary below configured thresholds.
-The planner_context.previous_action_success field is true when the tracked mean body error, root pose error, and object position error are below their configured thresholds. For stand_before_pick, it is also true when the robot root is within the configured horizontal reach distance of the current box.
-The planner_context.measured_task_completion field is true only when the actual object position is within threshold of the target object position. Ignore object orientation for success and completion.
-The planner_context.distance_context field contains robot-to-object and object-to-target distances; use those distances when deciding whether to approach, pick, place, retry, or finish.
-Use the image to infer whether the robot is doing the task correctly. Check whether the box appears held with two hands during carry/place keyframes, whether it has slipped or been dropped, and whether the visible robot/object state contradicts the expected phase.
-If previous_action_finished is false, do not advance to a new semantic phase.
-If previous_action_success is false, do not advance to the next semantic phase and do not mark the task complete.
-If the image suggests the object is dropped, not between the hands, or not controlled during an object-aware keyframe, treat the previous action as unsafe/failed even if the numeric context is ambiguous, and choose a recovery or retry keyframe.
-On failure, choose the safest retry/recovery keyframe from the allowed list: retry the previous keyframe if the robot/object state still matches it; otherwise choose a safe standing/setup keyframe before retrying.
-For failed pick attempts, especially crouch_to_pick or stand_after_pick, recover with stand_before_pick first, then retry crouch_to_pick on the next request.
-For failed place attempts, especially stand_before_place or crouch_to_place, retry the failed place keyframe if the robot is still safely holding the object; otherwise recover with stand_before_place before retrying crouch_to_place.
-For failed final standby, retry stand_after_place.
-At the end of the task, the robot should be in a "stand" keyframe with the object placed at the target location. After placing the object, the robot stands without holding it, but still uses the measured object pose as a policy observation.
-Your response must follow exactly the JSON schema provided, and only include the allowed keyframes.
-The JSON format is:
-{
-    "next_keyframe": string,  // one of the allowed keyframes
-    "object_in_manipulation": boolean,  // same as object_to_manipulate: true means retargeting and policy should consider the object
-    "task_completion": boolean  // whether the task is completed after executing the chosen keyframe
-}
+You are a high-level planner for a robot performing a physical pick-and-place task.
+Choose exactly ONE next keyframe from the allowed library. Use the measured
+planner_context and current image together. Do not assume an action executed
+successfully merely because it was selected, published, or the robot stopped.
 
-Normally after successfully placing the object, choose the final stand keyframe and set task_completion true only if planner_context.measured_task_completion is true and the selected keyframe leaves the robot in the final standby state.
-The object_in_manipulation boolean is the same effective flag as object_to_manipulate. It controls whether the retargeter and policy should consider object target/current-object observations.
-Set object_in_manipulation true for every keyframe in this pick-and-place library: stand_before_pick, crouch_to_pick, stand_after_pick, stand_before_place, crouch_to_place, and stand_after_place.
-The standing setup and final standby keyframes still need the measured object pose in the robot base frame, even when the hands are not holding the object. Never set object_in_manipulation false for one of these six keyframes.
+KEYFRAME MEANINGS
+- stand_before_pick: approach/prepare to pick. Does NOT grasp or lift.
+- crouch_to_pick: lower the robot and establish the grasp. Does NOT complete lifting.
+- stand_after_pick: stand and lift the grasped object. Does NOT carry it to its destination.
+- stand_before_place: carry/position the object ABOVE the placement location,
+  still holding it. Does NOT lower, release, or place the object.
+- crouch_to_place: lower the object onto the intended supporting surface at the
+  destination. This is the required placement action.
+- stand_after_place: withdraw from the placed object and return to standby.
+  This is NOT a substitute for crouch_to_place.
 
-Rules:
-- Return only valid JSON matching the provided schema.
-- Do not output markdown, explanations, or code fences.
-- Do not invent actions outside the allowed keyframes.
-- Use only planner_context and the image; do not assume an action succeeded if planner_context.previous_action_success is false or null.
+REQUIRED PROGRESSION
+Normal successful order:
+stand_before_pick -> crouch_to_pick -> stand_after_pick -> stand_before_place
+-> crouch_to_place -> stand_after_place.
+Select only the next step, never skip an intermediate manipulation step.
+In particular, NEVER transition directly from stand_before_place to
+stand_after_place, even if measured_task_completion is true.
+
+DECISION PROCEDURE (apply in this order)
+1. Read previous_action, previous_action_finished, previous_action_success,
+   stationary, distance_context, tracking_errors, and measured_task_completion.
+   Treat missing/null evidence as unknown, not success.
+2. On the first request (previous_action="none"), choose stand_before_pick unless
+   pick_within_horizontal_reach is true and the image supports a safe immediate
+   pickup; only then may you choose crouch_to_pick. Do not jump to carry/place/finish.
+3. For an existing previous action, if previous_action_finished is false, do not
+   advance. Select the same action only if safe; otherwise a safe recovery/setup
+   action. task_completion must be false.
+4. If previous_action_success is false or null, or the image contradicts success,
+   do not advance or claim completion. Apply the recovery rules below.
+5. Only for a finished, successful action with consistent visual evidence:
+   - stand_before_pick -> crouch_to_pick, but ONLY when
+     distance_context.pick_within_horizontal_reach is true.
+     Otherwise repeat stand_before_pick.
+   - crouch_to_pick -> stand_after_pick, only with the grasp established.
+   - stand_after_pick -> stand_before_place, only with the object held securely.
+   - stand_before_place -> crouch_to_place, only when safely positioned to lower it.
+   - crouch_to_place -> stand_after_place, only when the object is supported at
+     the intended destination, not suspended above it.
+   - stand_after_place -> stand_after_place; evaluate completion as specified below.
+
+INTERPRET THE MEASUREMENTS CORRECTLY
+previous_action_finished means stationary long enough; it does NOT prove success.
+previous_action_success checks configured tracking/object errors, with a horizontal
+reach exception for stand_before_pick. Verify the image is consistent with it.
+measured_task_completion means object POSITION is inside a tolerance around the
+destination. It does NOT prove that crouch_to_place happened, that the object was
+released, that the support surface carries its weight, or that the final stand
+finished. A held object near the target is NOT a completed placement.
+Small body/root tracking errors only show pose tracking; they do not prove grasp,
+transport, placement, or release. Ignore object orientation error for completion.
+Use the configured XY reach test, not 3D robot-to-object distance, for pickup.
+If the object/support/grasp is occluded or ambiguous, do not claim visual success.
+
+RECOVERY
+- Failed pick/lift or lost grasp: stand_before_pick, then retry crouch_to_pick
+  only after the approach/reach conditions are satisfied.
+- Failed stand_before_place/crouch_to_place while safely holding the object:
+  retry that action if safe, or use stand_before_place to re-establish placement
+  setup, then crouch_to_place. NEVER recover by skipping to stand_after_place.
+- If the object dropped or is no longer controlled, do not continue as if carrying
+  it. Recover through stand_before_pick and pickup; proximity to the target alone
+  must not be counted as successful placement.
+- Failed final standby with the object still properly placed: retry stand_after_place.
+- Safety/recovery can move backward or repeat, but cannot skip placement.
+
+TASK COMPLETION: OBSERVED, NOT PREDICTED
+task_completion must remain false for every pick/carry/place decision AND for
+the first selection of stand_after_place after crouch_to_place.
+Set task_completion=true ONLY when ALL are true:
+- previous_action is stand_after_place;
+- previous_action_finished is true;
+- previous_action_success is true;
+- measured_task_completion is true;
+- the image confirms the robot is standing without holding the object and the
+  object rests on its intended supporting surface at the destination.
+When all checks pass, return next_keyframe="stand_after_place" and task_completion=true.
+Otherwise keep task_completion=false and choose the appropriate retry/recovery.
+Never predict that a newly selected action will finish the task: the caller uses
+task_completion=true to stop planning immediately.
+
+OBJECT OBSERVATION FLAG
+Always set object_in_manipulation=true for all six library keyframes, including
+both setup and final standing poses. This flag enables object-aware retargeting
+and current-object/goal observations; it does NOT mean the hands currently hold
+the object.
+
+EXAMPLES (conditions in each example must actually be observed)
+Finished/successful stand_before_place, safely holding above the destination:
+{"next_keyframe":"crouch_to_place","object_in_manipulation":true,"task_completion":false}
+Finished/successful crouch_to_place, object supported at the destination:
+{"next_keyframe":"stand_after_place","object_in_manipulation":true,"task_completion":false}
+Failed stand_before_place, object still safely held and a retry is safe:
+{"next_keyframe":"stand_before_place","object_in_manipulation":true,"task_completion":false}
+Finished/successful stand_after_place, measured completion true, object visibly
+placed and no longer held:
+{"next_keyframe":"stand_after_place","object_in_manipulation":true,"task_completion":true}
+
+OUTPUT
+Return only a JSON object matching the provided schema: next_keyframe (one allowed
+name), object_in_manipulation (boolean), task_completion (boolean).
+No markdown, explanations, extra fields, invented actions, or multiple keyframes.
 """.strip()
 
 
@@ -105,6 +175,13 @@ class VLMServiceNode(Node):
         self.declare_parameter("image_topic", "/camera/image_raw")
         self.declare_parameter("request_image_topic", "/vlm/request_image")
         self.declare_parameter("image_wait_timeout_sec", 10.0)
+        self.declare_parameter("ollama_host", DEFAULT_OLLAMA_HOST)
+        self.declare_parameter("model_name", DEFAULT_MODEL)
+        self._ollama_host = str(self.get_parameter("ollama_host").value).strip()
+        self._model_name = str(self.get_parameter("model_name").value).strip()
+        if not self._ollama_host or not self._model_name:
+            raise ValueError("ollama_host and model_name must not be empty")
+        self._ollama_client = Client(host=self._ollama_host)
 
         service_name = self.get_parameter("service_name").get_parameter_value().string_value
         image_topic = self.get_parameter("image_topic").get_parameter_value().string_value
@@ -149,7 +226,7 @@ class VLMServiceNode(Node):
         self.get_logger().info(
             f"Waiting up to {self._image_wait_timeout_sec:.1f}s for a fresh camera frame per request"
         )
-        self.get_logger().info(f"Using model: {MODEL_NAME}")
+        self.get_logger().info(f"Using Ollama endpoint: {self._ollama_host}, model: {self._model_name}")
 
     def _image_callback(self, msg: Image) -> None:
         if self._bridge is None or cv2 is None:
@@ -213,8 +290,8 @@ class VLMServiceNode(Node):
         image_b64 = base64.b64encode(encoded.tobytes()).decode("ascii")
 
         start_time = time.perf_counter()
-        response = chat(
-            model=MODEL_NAME,
+        response = self._ollama_client.chat(
+            model=self._model_name,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt, "images": [image_b64]},

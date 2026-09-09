@@ -59,6 +59,8 @@ class SceneCameraNode(Node):
         self.declare_parameter("backend", "mujoco")
         self.declare_parameter("topic", "/camera/image_raw")
         self.declare_parameter("real_image_topic", "/real_camera/image_raw")
+        self.declare_parameter("camera_device", "/dev/video0")
+        self.declare_parameter("capture_fps", 30.0)
         self.declare_parameter("rate_hz", 2.0)
         self.declare_parameter("width", 640)
         self.declare_parameter("height", 480)
@@ -96,8 +98,94 @@ class SceneCameraNode(Node):
             self._init_mujoco_backend()
         elif self._backend in ("real", "passthrough"):
             self._init_passthrough_backend()
+        elif self._backend == "usb":
+            self._init_usb_backend()
         else:
-            raise ValueError("backend must be one of: mujoco, real, passthrough")
+            raise ValueError("backend must be one of: mujoco, real, passthrough, usb")
+
+    def _init_usb_backend(self) -> None:
+        import cv2
+
+        device = str(self.get_parameter("camera_device").value)
+        capture_fps = float(self.get_parameter("capture_fps").value)
+        if not np.isfinite(capture_fps) or capture_fps <= 0:
+            raise ValueError("capture_fps must be finite and positive")
+        capture = cv2.VideoCapture(device, cv2.CAP_V4L2)
+        if not capture.isOpened():
+            capture.release()
+            raise RuntimeError(f"Cannot open USB camera {device}; check device, permissions and other camera users")
+        capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        capture.set(cv2.CAP_PROP_FRAME_WIDTH, self._width)
+        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self._height)
+        capture.set(cv2.CAP_PROP_FPS, capture_fps)
+        capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        self._usb_lock = threading.Lock()
+        self._usb_stop = threading.Event()
+        self._usb_latest = None
+        self._usb_sequence = 0
+        self._usb_published_sequence = 0
+        self._usb_last_warning = time.monotonic()
+        self._published_first_image = False
+        # Drain the camera continuously, independently of the lower VLM publish
+        # rate. Reading only at 2 Hz would accumulate old frames in the driver.
+        self._usb_thread = threading.Thread(target=self._capture_usb_images, args=(capture,), daemon=True)
+        self._usb_thread.start()
+        self._timer = self.create_timer(1.0 / self._rate_hz, self._publish_usb_image)
+        self.get_logger().info(f"USB camera {device} -> {self._topic} at {self._rate_hz:g} Hz")
+
+    def _capture_usb_images(self, capture) -> None:
+        try:
+            while not self._usb_stop.is_set():
+                ok, frame = capture.read()
+                if not ok or frame is None:
+                    with self._usb_lock:
+                        self._usb_latest = None
+                    self._usb_stop.wait(0.1)
+                    continue
+                stamp = self.get_clock().now().to_msg()
+                with self._usb_lock:
+                    self._usb_sequence += 1
+                    self._usb_latest = (self._usb_sequence, frame, stamp, time.monotonic())
+        except Exception as exc:
+            with self._usb_lock:
+                self._usb_latest = None
+            self.get_logger().error(f"USB camera capture failed: {exc}")
+        finally:
+            capture.release()
+
+    def _publish_usb_image(self) -> None:
+        with self._usb_lock:
+            latest = self._usb_latest
+        now = time.monotonic()
+        if latest is None or now - latest[3] > 2.0 or latest[0] == self._usb_published_sequence:
+            if now - self._usb_last_warning > 2.0:
+                self.get_logger().warning("No fresh USB camera frame; check the camera and restart after reconnecting")
+                self._usb_last_warning = now
+            return
+        sequence, frame, stamp, _ = latest
+        frame = np.ascontiguousarray(frame, dtype=np.uint8)
+        msg = Image()
+        msg.header.stamp = stamp
+        msg.header.frame_id = self._frame_id
+        msg.height, msg.width = frame.shape[:2]
+        msg.encoding = "bgr8"
+        msg.is_bigendian = 0
+        msg.step = msg.width * 3
+        msg.data = frame.tobytes()
+        self._pub.publish(msg)
+        self._usb_published_sequence = sequence
+        self._usb_last_warning = now
+        if not self._published_first_image:
+            self._published_first_image = True
+            self.get_logger().info(f"USB camera published first image ({msg.width}x{msg.height})")
+
+    def destroy_node(self):
+        if hasattr(self, "_usb_stop"):
+            self._usb_stop.set()
+            self._usb_thread.join(timeout=2.0)
+        if hasattr(self, "_renderer"):
+            self._renderer.close()
+        return super().destroy_node()
 
     def _init_passthrough_backend(self) -> None:
         if self._real_image_topic == self._topic:
