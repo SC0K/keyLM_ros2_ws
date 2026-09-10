@@ -16,7 +16,12 @@ from lm.vlm_planner_app import VLMPlannerApp, build_arg_parser
 @pytest.fixture
 def launch_module(monkeypatch, tmp_path):
     monkeypatch.setenv("ROS_LOG_DIR", str(tmp_path / "ros_logs"))
-    return runpy.run_path(str(Path(__file__).resolve().parents[1] / "launch/vlm_experiment_launch.py"))
+    source = Path(__file__).resolve().parents[1]
+    module = runpy.run_path(str(source / "launch/vlm_experiment_launch.py"))
+    original = module["get_package_share_directory"]
+    monkeypatch.setitem(module["generate_launch_description"].__globals__, "get_package_share_directory",
+                        lambda package: str(source) if package == "lm" else original(package))
+    return module
 
 
 def context_for(module, **overrides):
@@ -108,3 +113,58 @@ def test_supervision_forwarded_to_robot_and_gui(launch_module, monkeypatch, mode
     assert forwarded["supervised_mode"] == "true"
     from lm.vlm_planner_app import PLANNER_EXTRA_DEFAULTS
     assert "supervised_mode" in PLANNER_EXTRA_DEFAULTS
+
+
+def test_bucket_simulator_monitor_and_controller_share_scene(monkeypatch):
+    source = Path(__file__).resolve().parents[2] / "crl-humanoid-ros/crl_g1_goalcontroller_py/crl_g1_goalcontroller/launch/g1_keyframe_sim.py"
+    module = runpy.run_path(str(source))
+    context = LaunchContext()
+    context.launch_configurations["scene_object"] = "bucket"
+    for action in module["generate_launch_description"]().entities:
+        if isinstance(action, DeclareLaunchArgument):
+            action.execute(context)
+    fn = module["_launch_nodes"]
+    monkeypatch.setitem(fn.__globals__, "Node", lambda **kwargs: kwargs)
+    nodes = fn(context)
+    evaluated = []
+    for node in nodes:
+        values = {}
+        for params in node["parameters"]:
+            if isinstance(params, dict):
+                values.update(evaluate_parameters(context, normalize_parameters([params]))[0])
+        evaluated.append(values)
+    sim, monitor, controller = evaluated
+    assert sim["robot_xml_file"] == monitor["robot_xml_file"] == "g1_description/scene_crl_with_bucket.xml"
+    assert sim["object_joint_name"] == monitor["object_joint_name"] == "bucket_freejoint"
+    assert controller["robot_xml"].endswith(sim["robot_xml_file"])
+    assert sim["object_pose_topic"] == monitor["object_pose_topic"] == controller["current_object_pose_topic"]
+    assert abs(sim["initial_object_pos"][2]) < .01  # mesh-base origin, not box centre
+
+
+def test_real_launch_bridges_both_mocap_objects_and_has_one_selected_output(monkeypatch):
+    from launch.actions import OpaqueFunction
+    source = Path(__file__).resolve().parents[2] / "crl-humanoid-ros/crl_g1_goalcontroller_py/crl_g1_goalcontroller/launch/g1_keyframe.py"
+    module = runpy.run_path(str(source))
+    nodes = []
+    def capture(**kwargs):
+        nodes.append(kwargs)
+        return OpaqueFunction(function=lambda _: [])
+    monkeypatch.setitem(module["generate_launch_description"].__globals__, "Node", capture)
+    context = LaunchContext()
+    context.launch_configurations["optitrack_bucket_pose_topic"] = "/custom/tracked_bucket"
+    for action in module["generate_launch_description"]().entities:
+        if isinstance(action, DeclareLaunchArgument):
+            action.execute(context)
+    active = [node for node in nodes if "condition" not in node or node["condition"].evaluate(context)]
+    bridges = [node for node in active if node["executable"] == "rigidbody_to_pose_stamped"]
+    assert len(bridges) == 2
+    params = {node["name"]: evaluate_parameters(context, normalize_parameters(node["parameters"]))[0]
+              for node in bridges}
+    assert params["bucket_mocap_pose_bridge"]["input_topic"] == "/custom/tracked_bucket"
+    assert params["bucket_mocap_pose_bridge"]["output_topic"] == "/mocap/bucket_pose"
+    assert params["box_mocap_pose_bridge"]["output_topic"] == "/mocap/box_pose"
+    assert all(p["require_tracking_valid"] for p in params.values())
+    controller = next(node for node in active if node["executable"] == "g1_keyframe_controller")
+    config = evaluate_parameters(context, normalize_parameters(controller["parameters"]))[0]
+    assert config["mocap_object_selection"] is True
+    assert config["current_object_pose_topic"] not in (config["tracked_box_pose_topic"], config["tracked_bucket_pose_topic"])

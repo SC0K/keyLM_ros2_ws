@@ -54,7 +54,7 @@ def test_approach_reuses_stand_library_and_is_an_allowed_vlm_action():
     from lm.vlm_service import KeyframeDecision, SYSTEM_PROMPT
 
     assert source_keyframe_name("approach") == "stand_before_pick"
-    assert KeyframeDecision(next_keyframe="approach", object_in_manipulation=False, task_completion=False).next_keyframe == "approach"
+    assert KeyframeDecision(next_keyframe="approach_box", object_in_manipulation=False, task_completion=False).next_keyframe == "approach_box"
     assert "choose approach" in SYSTEM_PROMPT
 
 

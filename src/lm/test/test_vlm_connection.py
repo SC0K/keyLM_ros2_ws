@@ -31,14 +31,14 @@ def test_case_profile_and_explicit_overrides():
 def test_query_uses_configured_client_and_model():
     node = VLMServiceNode.__new__(VLMServiceNode)
     node._model_name = "server-specific-model"
-    node._allowed_keyframes = ["stand_before_pick"]
+    node._allowed_keyframes = ["stand_before_pick_box"]
     node._ollama_client = Mock()
     node._ollama_client.chat.return_value = SimpleNamespace(message=SimpleNamespace(
-        content='{"next_keyframe":"stand_before_pick",'
+        content='{"next_keyframe":"stand_before_pick_box",'
                 '"object_in_manipulation":true,"task_completion":false}'
     ))
     decision, _, _ = node._query_vlm(np.zeros((8, 8, 3), dtype=np.uint8), "pick", "{}")
-    assert decision.next_keyframe == "stand_before_pick"
+    assert decision.next_keyframe == "stand_before_pick_box"
     assert node._ollama_client.chat.call_args.kwargs["model"] == "server-specific-model"
     messages = node._ollama_client.chat.call_args.kwargs["messages"]
     assert messages[0] == {"role": "system", "content": SYSTEM_PROMPT}
@@ -49,10 +49,10 @@ def test_prompt_examples_require_placement_before_final_stand():
     examples = [KeyframeDecision.model_validate_json(line)
                 for line in SYSTEM_PROMPT.splitlines() if line.startswith('{"next_keyframe"')]
     assert [(example.next_keyframe, example.task_completion) for example in examples] == [
-        ("crouch_to_place", False),
-        ("stand_after_place", False),
-        ("stand_before_place", False),
-        ("stand_after_place", True),
+        ("crouch_to_place_box", False),
+        ("stand_after_place_bucket", False),
+        ("stand_before_place_bucket", False),
+        ("stand_after_place_box", True),
     ]
     assert all(example.object_in_manipulation for example in examples)
     assert "NEVER transition directly from stand_before_place to" in SYSTEM_PROMPT

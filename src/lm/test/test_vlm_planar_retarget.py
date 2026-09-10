@@ -22,6 +22,111 @@ LIBRARY = SRC / "lm/keyframes"
 PYTHON_PACKAGE = SRC / "crl-humanoid-ros/crl_g1_goalcontroller_py/crl_g1_goalcontroller_python"
 
 
+@pytest.mark.parametrize("kind", ["box", "bucket"])
+@pytest.mark.parametrize("phase", ["approach", "stand_before_pick", "crouch_to_pick", "stand_after_pick",
+                                  "stand_before_place", "crouch_to_place", "stand_after_place"])
+def test_named_object_libraries_route_and_preserve_authored_geometry(retargeter, kind, phase):
+    from lm.keyframe_modes import keyframe_phase, keyframe_object_type
+    name = f"{phase}_{kind}"
+    source = retargeter._load_payload(name)
+    blob, info = retargeter._process_keyframe(name, True)
+    assert keyframe_phase(name) == phase and keyframe_object_type(name) == kind
+    assert json.loads(info)["object_type"] == kind
+    hands = [retargeter._ik_model.body(i).name for i in retargeter._ik_ee_body_ids]
+    assert len(hands) == (1 if kind == "bucket" else 2)
+    if kind == "bucket":
+        assert hands[0].startswith("right_")
+    with np.load(BytesIO(blob), allow_pickle=True) as result:
+        assert bool(result["object_to_manipulate"][0]) == (phase != "approach")
+        names = list(source["body_names"])
+        assert result["body_positions"][names.index("pelvis"), 2] == source["body_positions"][names.index("pelvis"), 2]
+        if phase != "approach":
+            assert result["object_position_xyz"][2] == source["object_position_xyz"][2]
+        if phase not in ("stand_before_pick", "stand_after_place"):
+            np.testing.assert_array_equal(result["dof_positions"], source["dof_positions"])
+    retargeter._apply_box_ik.assert_not_called()
+
+
+def test_bucket_conversion_keeps_original_joint_pose_and_heights(retargeter):
+    for path in sorted((PYTHON_PACKAGE / "resource/test_sequence_bucket").glob("*.npz")):
+        converted = retargeter._load_payload(path.stem)
+        with np.load(path, allow_pickle=True) as raw:
+            np.testing.assert_allclose(converted["dof_positions"], raw["qpos"][7:36], atol=1e-7)
+            assert converted["object_position_xyz"][2] == raw["object_pos_w"][2]
+            assert np.isclose(converted["body_positions"][list(converted["body_names"]).index("pelvis"), 2], raw["qpos"][2])
+        assert len(converted["dof_names"]) == 29
+        assert len(converted["body_names"]) > 14
+
+
+def test_switching_library_resets_old_object_latches_and_hand_selection(retargeter):
+    retargeter._fixed_start_box_center = np.ones(3)
+    retargeter._select_keyframe_object("crouch_to_pick_bucket")
+    assert retargeter._fixed_start_box_center is None
+    assert len(retargeter._ik_ee_body_ids) == 1
+    retargeter._fixed_target_box_center = np.ones(3)
+    retargeter._select_keyframe_object("crouch_to_pick_box")
+    assert retargeter._fixed_target_box_center is None
+    assert len(retargeter._ik_ee_body_ids) == 2
+
+
+@pytest.mark.parametrize("ik_enabled", [False, True])
+@pytest.mark.parametrize("yaw", [0., .7, -1.4, np.pi])
+def test_bucket_pickup_stand_keeps_library_lateral_offset_and_heading(retargeter, yaw, ik_enabled):
+    retargeter._retarget_ik_enabled = ik_enabled
+    retargeter._current_box_center = np.array([1.6, -.8, .05])
+    retargeter._current_box_quat_wxyz = _yaw_to_quat_wxyz(yaw)
+    # This box-style planner hint must not override the bucket stance.
+    retargeter._target_root_center = np.array([10., 20., 30.])
+    retargeter._target_root_quat_wxyz = _yaw_to_quat_wxyz(-2.)
+    source = retargeter._load_payload("stand_before_pick_bucket")
+    pelvis = list(source["body_names"]).index("pelvis")
+    source_root = source["body_positions"][pelvis]
+    source_root_rotation = _quat_wxyz_to_rotmat(source["body_rotations"][pelvis])
+    source_root_yaw = np.arctan2(source_root_rotation[1, 0], source_root_rotation[0, 0])
+    source_heading = _quat_wxyz_to_rotmat(_yaw_to_quat_wxyz(source_root_yaw))
+    # Stance placement is planar; the generated stand keeps its own roll/pitch.
+    source_offset = source_heading[:2, :2].T @ (source["object_position_xyz"] - source_root)[:2]
+    source_box_rotation = _quat_wxyz_to_rotmat(source["object_quat_wxyz"])
+    source_box_yaw = np.arctan2(source_box_rotation[1, 0], source_box_rotation[0, 0])
+    blob, info = retargeter._process_keyframe("stand_before_pick_bucket", True)
+    with np.load(BytesIO(blob), allow_pickle=True) as result:
+        root = result["body_positions"][pelvis]
+        root_rotation = _quat_wxyz_to_rotmat(result["body_rotations"][pelvis])
+        offset = root_rotation[:2, :2].T @ (result["object_position_xyz"] - root)[:2]
+        np.testing.assert_allclose(offset, source_offset, atol=1e-6)
+        np.testing.assert_allclose(offset, [.40746197, -.16375582], atol=1e-6)
+        expected_rotation = _quat_wxyz_to_rotmat(_yaw_to_quat_wxyz(yaw - source_box_yaw))
+        np.testing.assert_allclose(root[:2], retargeter._current_box_center[:2]
+                                   + expected_rotation[:2, :2] @ (source_root - source["object_position_xyz"])[:2], atol=1e-6)
+        np.testing.assert_allclose(result["object_position_xyz"][:2], retargeter._current_box_center[:2])
+        assert root[2] == source_root[2]
+        assert result["object_position_xyz"][2] == source["object_position_xyz"][2]
+        expected_angles = dict(zip(POLICY_JOINT_NAMES, retargeter._standing_default_angles + retargeter._standing_joint_delta))
+        np.testing.assert_allclose(result["dof_positions"], [expected_angles[n] for n in result["dof_names"]])
+        assert bool(result["object_to_manipulate"][0])
+    assert json.loads(info)["mode"] == "generated_stationary_stand_bucket_library_placement"
+    retargeter._apply_box_ik.assert_not_called()
+
+
+def test_bucket_right_hand_target_ignores_box_dimensions(retargeter):
+    from lm.keyframe_box_retarget import BoxFrame, grasp_body_names, _pick_existing_default_feet, retarget_qpos_for_box_grasp
+    payload = retargeter._load_payload("crouch_to_pick_bucket")
+    model, data = retargeter._ik_model, retargeter._ik_data
+    qpos = retargeter._build_qpos_from_payload(payload)
+    data.qpos[:] = qpos
+    mujoco.mj_forward(model, data)
+    hands = [model.body(n).id for n in grasp_body_names(model, "bucket")]
+    feet = [model.body(n).id for n in _pick_existing_default_feet(model)]
+    current_hand = data.xpos[hands].copy()
+    source = BoxFrame(center=payload["object_position_xyz"], quat_wxyz=payload["object_quat_wxyz"], size=np.array([.3, .3, .3]))
+    target = BoxFrame(center=source.center.copy(), quat_wxyz=source.quat_wxyz.copy(), size=np.array([1.2, .05, .8]))
+    result = retarget_qpos_for_box_grasp(model, data, qpos=qpos, source_box=source, target_box=target,
+                                        hand_body_ids=hands, foot_body_ids=feet, object_type="bucket", preserve_root_height=True,
+                                        source_forward_axis="y", source_up_axis="-z", target_forward_axis="x", target_up_axis="z")
+    np.testing.assert_allclose(result.qpos, qpos)
+    np.testing.assert_allclose(result.hand_targets, current_hand)
+
+
 @pytest.fixture
 def retargeter():
     node = KeyframeRetargeterNode.__new__(KeyframeRetargeterNode)

@@ -37,7 +37,8 @@ from lm.keyframe_box_retarget import (
     _yaw_from_matched_rotation,
 )
 from lm.generated_stand import POLICY_JOINT_NAMES, VLM_STANDING_LEAN_DEG, generated_stand_joint_delta
-from lm.keyframe_modes import MANIPULATION_KEYFRAMES, source_keyframe_name
+from lm.keyframe_modes import MANIPULATION_KEYFRAMES, PLANNER_KEYFRAMES, source_keyframe_name, keyframe_phase, keyframe_object_type
+from std_srvs.srv import Trigger
 
 _AXIS_TO_LOCAL_VEC = {
     "x": np.array([1.0, 0.0, 0.0], dtype=np.float64),
@@ -271,6 +272,7 @@ class KeyframeRetargeterNode(Node):
 
         retarget_keyframe_service = str(self.get_parameter("retarget_keyframe_service").value)
         self._retarget_object_type = str(self.get_parameter("retarget_object_type").value)
+        self._default_retarget_object_type = self._retarget_object_type
         self._retarget_ik_enabled = bool(self.get_parameter("retarget_ik_enabled").value)
         standing_config = str(self.get_parameter("standing_config_file").value).strip()
         if not standing_config:
@@ -340,13 +342,8 @@ class KeyframeRetargeterNode(Node):
         # The semantic source face belongs to the reference motion, not to an
         # individual carried/placed posture. Infer it once from the canonical
         # pickup frame and retain it for the entire task.
-        if self._retarget_object_type == "bucket":
-            self._source_box_forward_axis = self._box_hold_forward_axis = "x"
-            self._source_box_up_axis = self._box_hold_up_axis = "z"
-        else:
-            self._source_box_forward_axis = self._infer_library_source_forward_axis(
-                self._source_box_forward_axis
-            )
+        self._source_box_forward_axis = self._infer_library_source_forward_axis(
+            self._source_box_forward_axis)
 
         self._object_to_manipulate = True
         self._current_box_center = np.array([10.0, 10.0, self._box_size_xyz[2] * 0.5], dtype=np.float64)
@@ -377,6 +374,7 @@ class KeyframeRetargeterNode(Node):
             retarget_keyframe_service,
             self._on_retarget_keyframe_request,
         )
+        self.create_service(Trigger, retarget_keyframe_service + "/reset_task", self._on_reset_task)
 
         self.get_logger().info(
             "Retargeter service ready. service=%s. keyframes=%s. "
@@ -420,29 +418,32 @@ class KeyframeRetargeterNode(Node):
         raise FileNotFoundError(f"Could not locate keyframe library in: {', '.join(str(c) for c in candidates)}")
 
     def _process_keyframe(self, keyframe_name: str, object_to_manipulate: bool | None = None) -> tuple[bytes, str]:
+        self._select_keyframe_object(keyframe_name)
+        phase = keyframe_phase(keyframe_name)
         if object_to_manipulate is not None:
             self._object_to_manipulate = bool(object_to_manipulate)
         if keyframe_name in MANIPULATION_KEYFRAMES:
             self._object_to_manipulate = True
-        elif keyframe_name == "approach":
+        elif phase == "approach":
             self._object_to_manipulate = False
         payload = self._load_payload(keyframe_name)
-        if keyframe_name == "approach":
+        if phase == "approach":
             # Use the planner's approach root (offset from current box XY),
             # keeping authored height/joints. The controller then replaces the
             # posture through its existing locomotion-goal path.
             self._apply_root_pose(payload, self._target_root_center, self._target_root_quat_wxyz)
             self._zero_object_targets(payload)
             mode = "approach_locomotion_at_offset_root"
-        elif keyframe_name in ("stand_before_pick", "stand_after_place"):
-            mode = self._generate_stationary_stand(keyframe_name, payload)
+        elif phase in ("stand_before_pick", "stand_after_place"):
+            mode = self._generate_stationary_stand(phase, payload)
         elif self._object_to_manipulate and not self._retarget_ik_enabled:
-            mode = self._retarget_planar(keyframe_name, payload)
+            mode = self._retarget_planar(phase, payload)
         elif self._object_to_manipulate:
-            mode = self._retarget_for_box_task(keyframe_name, payload)
+            mode = self._retarget_for_box_task(phase, payload)
         else:
             mode = self._retarget_root_only(payload)
         payload["object_to_manipulate"] = np.asarray([self._object_to_manipulate], dtype=np.bool_)
+        payload["object_type"] = np.asarray(self._retarget_object_type)
         payload_bytes = self._serialize_payload(payload)
 
         self._latest_retargeted_keyframe_data = list(payload_bytes)
@@ -451,6 +452,7 @@ class KeyframeRetargeterNode(Node):
         info_data = json.dumps(
             {
                 "input_keyframe": keyframe_name,
+                "object_type": self._retarget_object_type,
                 "serialized_npz_bytes": len(payload_bytes),
                 "mode": mode,
                 "retarget_ik_enabled": self._retarget_ik_enabled,
@@ -475,14 +477,41 @@ class KeyframeRetargeterNode(Node):
         )
         return payload_bytes, info_data
 
+    def _select_keyframe_object(self, name: str) -> None:
+        selected = keyframe_object_type(name, getattr(self, "_default_retarget_object_type", self._retarget_object_type))
+        if selected != self._retarget_object_type:
+            # A new object/task cannot reuse the previous object's latched poses.
+            for field in ("_fixed_start_box_center", "_fixed_start_box_quat_wxyz",
+                          "_fixed_target_box_center", "_fixed_target_box_quat_wxyz", "_fixed_box_hold_forward_axis"):
+                setattr(self, field, None)
+        self._retarget_object_type = selected
+        self._ik_ee_body_ids = [self._ik_model.body(name).id for name in grasp_body_names(self._ik_model, selected)]
+
+    def _on_reset_task(self, request, response):
+        for field in ("_fixed_start_box_center", "_fixed_start_box_quat_wxyz",
+                      "_fixed_target_box_center", "_fixed_target_box_quat_wxyz", "_fixed_box_hold_forward_axis"):
+            setattr(self, field, None)
+        response.success = True
+        response.message = "Object/task pose latches cleared; active robot goal unchanged"
+        return response
+
     def _generate_stationary_stand(self, name: str, payload: dict[str, np.ndarray]) -> str:
         """Test-style default joints + lean, but retain this library frame's root Z."""
-        positions, _ = self._extract_body_arrays(payload)
+        bucket_pickup = self._retarget_object_type == "bucket" and name == "stand_before_pick"
+        if bucket_pickup:
+            # The authored stance is left of the bucket, placing its handle on
+            # the robot's right. Rigidly place that stance using the same bucket
+            # frame alignment as pickup; never replace it with the box's centred
+            # nearest-side stance. This also applies when grasp IK is enabled.
+            self._retarget_planar(name, payload)
+        positions, rotations = self._extract_body_arrays(payload)
         names = [str(n) for n in payload["body_names"]]
+        pelvis = names.index("pelvis")
         qpos = self._ik_model.qpos0.copy()
-        qpos[:2] = self._target_root_center[:2]
-        qpos[2] = positions[names.index("pelvis"), 2]
-        qpos[3:7] = _yaw_to_quat_wxyz(_yaw_from_quat_wxyz(self._target_root_quat_wxyz))
+        qpos[:2] = positions[pelvis, :2] if bucket_pickup else self._target_root_center[:2]
+        qpos[2] = positions[pelvis, 2]
+        root_quat = rotations[pelvis] if bucket_pickup else self._target_root_quat_wxyz
+        qpos[3:7] = _yaw_to_quat_wxyz(_yaw_from_quat_wxyz(root_quat))
         angles = self._standing_default_angles + self._standing_joint_delta
         for joint_name, value in zip(POLICY_JOINT_NAMES, angles):
             qpos[self._ik_model.joint(joint_name).qposadr[0]] = value
@@ -491,7 +520,7 @@ class KeyframeRetargeterNode(Node):
         quat = self._current_box_quat_wxyz if name == "stand_before_pick" else self._target_box_quat_wxyz
         center[2] = np.asarray(payload["object_position_xyz"]).reshape(-1, 3)[0, 2]
         self._write_policy_object_pose(payload, center, quat)
-        return "generated_stationary_stand"
+        return "generated_stationary_stand_bucket_library_placement" if bucket_pickup else "generated_stationary_stand"
 
     def _retarget_planar(self, name: str, payload: dict[str, np.ndarray]) -> str:
         """Align semantic forward axes without changing robot joints or heights."""
@@ -533,12 +562,13 @@ class KeyframeRetargeterNode(Node):
         response: RetargetKeyframe.Response,
     ) -> RetargetKeyframe.Response:
         keyframe_name = request.keyframe_name.strip()
-        if not keyframe_name:
+        if keyframe_name not in PLANNER_KEYFRAMES:
             response.success = False
-            response.error_message = "keyframe_name is empty"
+            response.error_message = "keyframe_name must be an explicitly suffixed _box or _bucket action"
             return response
 
         try:
+            self._select_keyframe_object(keyframe_name)
             self._object_to_manipulate = bool(request.object_to_manipulate)
             request_current_box_center, request_current_box_quat_wxyz = _pose_to_arrays(request.current_box_pose)
             request_target_box_center, request_target_box_quat_wxyz = _pose_to_arrays(request.target_box_pose)
@@ -579,7 +609,7 @@ class KeyframeRetargeterNode(Node):
                     )
                 )
 
-            if keyframe_name in _PICK_POSE_KEYFRAMES:
+            if keyframe_phase(keyframe_name) in _PICK_POSE_KEYFRAMES:
                 self._current_box_center = self._fixed_start_box_center.copy()
                 self._current_box_quat_wxyz = (
                     self._fixed_start_box_quat_wxyz.copy()
@@ -729,7 +759,9 @@ class KeyframeRetargeterNode(Node):
         return src_quat, stored_src_quat, stored_frame
 
     def _infer_library_source_forward_axis(self, fallback_axis: str) -> str:
-        pickup_path = self._library_dir / "crouch_to_pick.npz"
+        pickup_path = self._library_dir / "crouch_to_pick_box.npz"
+        if not pickup_path.exists():
+            pickup_path = self._library_dir / "crouch_to_pick.npz"
         if not pickup_path.exists():
             self.get_logger().warning(
                 "No crouch_to_pick.npz in the keyframe library; using configured "
@@ -850,7 +882,12 @@ class KeyframeRetargeterNode(Node):
         return np.array([root_xy[0], root_xy[1], 0.0], dtype=np.float64), root_quat
 
     def _load_payload(self, keyframe_name: str) -> dict[str, np.ndarray]:
-        path = self._library_dir / f"{source_keyframe_name(keyframe_name)}.npz"
+        source = source_keyframe_name(keyframe_name)
+        # Legacy unsuffixed callers still resolve to the renamed box library.
+        canonical = source if source.endswith(("_box", "_bucket")) else source + "_box"
+        path = self._library_dir / f"{canonical}.npz"
+        if not path.exists() and not source.endswith(("_box", "_bucket")):
+            path = self._library_dir / f"{source}.npz"
         if not path.exists():
             raise FileNotFoundError(f"Keyframe not found: {path}")
         with np.load(path, allow_pickle=True) as data:

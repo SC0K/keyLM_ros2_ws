@@ -23,6 +23,7 @@ from sensor_msgs.msg import Image as ImageMsg
 from std_msgs.msg import String
 from std_srvs.srv import SetBool
 from lm.supervised_goal import SET_MODE_SUFFIX
+from lm.tracked_objects import TRACKED_OBJECT_DEFAULTS
 
 from lm.box_config import REAL_TARGET_BOX_GEOMETRY, SIM_TARGET_BOX_GEOMETRY, parse_box_size_xyz
 from lm.vlm_connection import (
@@ -47,6 +48,7 @@ GOAL_BODY_LINKS = (
 )
 
 PLANNER_EXTRA_DEFAULTS = {
+    **TRACKED_OBJECT_DEFAULTS,
     "supervised_mode": False,
     "robot_root_pose_topic": "",
     "retarget_keyframe_service": "/retargeter/generate_keyframe",
@@ -144,6 +146,8 @@ class PlannerAppNode(Node):
         self.declare_parameter("planner_decision_topic", "/vlm_planner/decision")
         self.declare_parameter("vlm_request_image_topic", "/vlm/request_image")
         for name, default in PLANNER_EXTRA_DEFAULTS.items():
+            if name == "mocap_object_selection" and real_robot:
+                default = True
             if name == "default_box_forward_axis" and real_robot:
                 default = REAL_TARGET_BOX_GEOMETRY.forward_axis
             self.declare_parameter(name, default)
@@ -802,7 +806,7 @@ class VLMPlannerApp:
             half_x = 0.5 * snap["box_size_xyz"][0] * scale
             half_y = 0.5 * snap["box_size_xyz"][1] * scale
             canvas.create_rectangle(x - half_x, y - half_y, x + half_x, y + half_y, fill="#ef4444", outline="#991b1b", width=2)
-            canvas.create_text(x + half_x + 8, y, text="box", anchor="w", fill="#7f1d1d")
+            canvas.create_text(x + half_x + 8, y, text="tracked object", anchor="w", fill="#7f1d1d")
 
         if snap["robot_pos"] is not None:
             x, y = to_px(snap["robot_pos"][:2])
@@ -841,7 +845,7 @@ class VLMPlannerApp:
         y0 = 14
         items = [
             ("#111827", "current robot"),
-            ("#ef4444", "current box"),
+            ("#ef4444", "current object"),
             ("#2563eb", "keyframe body"),
             ("#f59e0b", "keyframe object"),
         ]

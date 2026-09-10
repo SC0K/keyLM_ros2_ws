@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import threading
 import time
 from typing import Literal
@@ -14,7 +15,7 @@ from sensor_msgs.msg import Image
 from ollama import Client
 from pydantic import BaseModel, ValidationError
 
-from lm.keyframe_modes import MANIPULATION_KEYFRAMES
+from lm.keyframe_modes import MANIPULATION_KEYFRAMES, PLANNER_KEYFRAMES, keyframe_phase, keyframe_object_type
 from lm.vlm_connection import DEFAULT_MODEL, DEFAULT_OLLAMA_HOST
 from lm_interfaces.srv import VLMQuery
 
@@ -27,13 +28,10 @@ except ImportError:
 
 
 AllowedKeyframe = Literal[
-    "approach",
-    "crouch_to_pick",
-    "crouch_to_place",
-    "stand_after_pick",
-    "stand_after_place",
-    "stand_before_pick",
-    "stand_before_place",
+    "approach_box", "stand_before_pick_box", "crouch_to_pick_box", "stand_after_pick_box",
+    "stand_before_place_box", "crouch_to_place_box", "stand_after_place_box",
+    "approach_bucket", "stand_before_pick_bucket", "crouch_to_pick_bucket", "stand_after_pick_bucket",
+    "stand_before_place_bucket", "crouch_to_place_bucket", "stand_after_place_bucket",
 ]
 
 
@@ -48,6 +46,25 @@ You are a high-level planner for a robot performing a physical pick-and-place ta
 Choose exactly ONE next keyframe from the allowed library. Use the measured
 planner_context and current image together. Do not assume an action executed
 successfully merely because it was selected, published, or the robot stopped.
+
+OBJECT AND LIBRARY SELECTION
+Use the task text to identify the requested object and the image to confirm
+whether it is a box or bucket. Boxes use two-hand grasps; buckets use the right
+hand at the handle. Never require a two-hand grasp for a bucket.
+All phase names below are shorthand: append _box or _bucket to EVERY selected
+keyframe, including approach and standing poses. For example, a bucket placement
+uses stand_before_place_bucket -> crouch_to_place_bucket -> stand_after_place_bucket.
+The JSON fields do not change; the keyframe suffix identifies the object type.
+Never mix object libraries during a task. If planner_context.selected_object_type
+is set, retain it, including recovery. Do not switch objects while holding one.
+Choose the object from the task text and image, not from tracking availability.
+Every response selects a normal action; there is no separate object-selection
+query. The action's _box or _bucket suffix routes the matching measured pose
+locally for retargeting and policy observations. On the first real-deployment
+request, object distances may be unknown; follow the normal approach/reach rules.
+This is not an image-based 3D pose estimator. If the requested object is absent/ambiguous,
+do not invent a grasp or claim completion. Select only a visually safe
+setup/recovery phase, keeping task_completion=false.
 
 KEYFRAME MEANINGS
 - approach: locomotion toward the box when outside pickup reach. No grasp or lift;
@@ -133,7 +150,8 @@ Set task_completion=true ONLY when ALL are true:
 - measured_task_completion is true;
 - the image confirms the robot is standing without holding the object and the
   object rests on its intended supporting surface at the destination.
-When all checks pass, return next_keyframe="stand_after_place" and task_completion=true.
+When all checks pass, return next_keyframe="stand_after_place_box" or
+"stand_after_place_bucket" for the selected object and task_completion=true.
 Otherwise keep task_completion=false and choose the appropriate retry/recovery.
 Never predict that a newly selected action will finish the task: the caller uses
 task_completion=true to stop planning immediately.
@@ -149,14 +167,14 @@ node, regardless of the returned object_in_manipulation flag.
 
 EXAMPLES (conditions in each example must actually be observed)
 Finished/successful stand_before_place, safely holding above the destination:
-{"next_keyframe":"crouch_to_place","object_in_manipulation":true,"task_completion":false}
+{"next_keyframe":"crouch_to_place_box","object_in_manipulation":true,"task_completion":false}
 Finished/successful crouch_to_place, object supported at the destination:
-{"next_keyframe":"stand_after_place","object_in_manipulation":true,"task_completion":false}
+{"next_keyframe":"stand_after_place_bucket","object_in_manipulation":true,"task_completion":false}
 Failed stand_before_place, object still safely held and a retry is safe:
-{"next_keyframe":"stand_before_place","object_in_manipulation":true,"task_completion":false}
+{"next_keyframe":"stand_before_place_bucket","object_in_manipulation":true,"task_completion":false}
 Finished/successful stand_after_place, measured completion true, object visibly
 placed and no longer held:
-{"next_keyframe":"stand_after_place","object_in_manipulation":true,"task_completion":true}
+{"next_keyframe":"stand_after_place_box","object_in_manipulation":true,"task_completion":true}
 
 OUTPUT
 Return only a JSON object matching the provided schema: next_keyframe (one allowed
@@ -199,15 +217,7 @@ class VLMServiceNode(Node):
         request_image_topic = self.get_parameter("request_image_topic").get_parameter_value().string_value
         self._image_wait_timeout_sec = float(self.get_parameter("image_wait_timeout_sec").value)
 
-        self._allowed_keyframes = [
-            "approach",
-            "crouch_to_pick",
-            "crouch_to_place",
-            "stand_after_pick",
-            "stand_after_place",
-            "stand_before_pick",
-            "stand_before_place",
-        ]
+        self._allowed_keyframes = list(PLANNER_KEYFRAMES)
         self._latest_image_bgr = None
         self._latest_image_stamp = None
         self._latest_image_frame_id = ""
@@ -302,13 +312,15 @@ class VLMServiceNode(Node):
         image_b64 = base64.b64encode(encoded.tobytes()).decode("ascii")
 
         start_time = time.perf_counter()
+        schema = KeyframeDecision.model_json_schema()
+        schema["properties"]["next_keyframe"]["enum"] = self._allowed_keyframes
         response = self._ollama_client.chat(
             model=self._model_name,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt, "images": [image_b64]},
             ],
-            format=KeyframeDecision.model_json_schema(),
+            format=schema,
             think=False,
             options={
                 "temperature": 0.0,
@@ -322,6 +334,12 @@ class VLMServiceNode(Node):
         latency_sec = time.perf_counter() - start_time
         raw_content = response.message.content
         decision = KeyframeDecision.model_validate_json(raw_content)
+        if decision.next_keyframe not in self._allowed_keyframes:
+            raise ValueError("VLM must choose an explicit _box or _bucket keyframe from the allowed library")
+        context = json.loads(planner_context) if planner_context.strip() else {}
+        selected_type = context.get("selected_object_type") if isinstance(context, dict) else None
+        if selected_type in ("box", "bucket") and keyframe_object_type(decision.next_keyframe) != selected_type:
+            raise ValueError("VLM attempted to switch object libraries during an active task")
 
         # decision = KeyframeDecision(
         #     next_keyframe="crouch_to_pick",
@@ -365,7 +383,7 @@ class VLMServiceNode(Node):
             response.error_message = ""
             response.next_keyframe = decision.next_keyframe
             response.object_in_manipulation = (
-                decision.next_keyframe != "approach"
+                keyframe_phase(decision.next_keyframe) != "approach"
                 and (decision.object_in_manipulation or decision.next_keyframe in MANIPULATION_KEYFRAMES)
             )
             response.task_completion = decision.task_completion

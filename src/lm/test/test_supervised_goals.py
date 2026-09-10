@@ -15,12 +15,12 @@ from lm.supervised_goal import PREVIEW_LEASE_SEC, preview_id
 from lm.vlm_planner_app import VLMPlannerApp, planner_ros_arguments, PLANNER_EXTRA_DEFAULTS
 
 
-def message(token="preview-1", manipulation=True):
+def message(token="preview-1", manipulation=True, kind=""):
     stream = BytesIO()
     np.savez(stream, goal_root_pos=[1., 2., .8], goal_root_mat_2x3=[1., 0., 0., 0., 1., 0.],
              goal_joint_pos_delta=np.zeros(29), goal_body_pos_b=np.zeros((14, 3)),
              goal_body_mat_b_3x2=np.zeros((14, 6)), masked_goal_object_pos=[1.4, 2., .15],
-             masked_goal_object_quat=[1., 0., 0., 0.], object_to_manipulate=[manipulation])
+             masked_goal_object_quat=[1., 0., 0., 0.], object_to_manipulate=[manipulation], object_type=kind)
     msg = UInt8MultiArray(data=list(stream.getvalue()))
     msg.layout.dim = [MultiArrayDimension(label=token)]
     return msg

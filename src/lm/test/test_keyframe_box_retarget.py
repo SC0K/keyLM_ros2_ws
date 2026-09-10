@@ -196,7 +196,7 @@ def test_pickup_retarget_keeps_both_feet_grounded(target_geometry) -> None:
         str(PACKAGE_ROOT / "models" / "g1" / "g1_29dof.xml")
     )
     data = mujoco.MjData(model)
-    with np.load(PACKAGE_ROOT / "keyframes" / "crouch_to_pick.npz", allow_pickle=True) as npz:
+    with np.load(PACKAGE_ROOT / "keyframes" / "crouch_to_pick_box.npz", allow_pickle=True) as npz:
         payload = {key: npz[key] for key in npz.files}
 
     qpos = _qpos_from_payload(model, payload)

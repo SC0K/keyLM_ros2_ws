@@ -15,6 +15,7 @@ from geometry_msgs.msg import PoseStamped
 from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.node import Node
 from std_msgs.msg import MultiArrayDimension, String, UInt8MultiArray
+from std_srvs.srv import Trigger
 from lm.supervised_goal import APPROVED_SUFFIX, CANCEL_SUFFIX, PREVIEW_SUFFIX, PREVIEW_REFRESH_SEC
 
 from lm.box_config import (
@@ -22,8 +23,9 @@ from lm.box_config import (
     REAL_TARGET_BOX_GEOMETRY,
     parse_box_size_xyz,
 )
-from lm.keyframe_modes import MANIPULATION_KEYFRAMES
+from lm.keyframe_modes import MANIPULATION_KEYFRAMES, keyframe_phase, keyframe_object_type
 from lm_interfaces.srv import RetargetKeyframe, VLMQuery
+from lm.tracked_objects import TRACKED_OBJECT_DEFAULTS, TrackedObjects, validate_object_topics
 
 
 _AXIS_TO_LOCAL_VEC = {
@@ -157,6 +159,10 @@ class VLMClientNode(Node):
 
         # Real robot topics: actual_box_pose_topic="/red_box/pose", robot_root_pose_topic="/g1_torso/pose".
         self.declare_parameter("actual_box_pose_topic", "/actual_box_pose")
+        for name, default in TRACKED_OBJECT_DEFAULTS.items():
+            self.declare_parameter(name, default)
+        self.mocap_object_selection = bool(self.get_parameter("mocap_object_selection").value)
+        self._tracked_objects = TrackedObjects(self.get_parameter("tracked_object_timeout_sec").value)
         self.declare_parameter("robot_root_pose_topic", "")
         self.declare_parameter("monitor_topic", "/g1_sim/monitor")
         self.declare_parameter("tracking_error_topic", "/tracking_errors")
@@ -226,6 +232,7 @@ class VLMClientNode(Node):
         self._last_box_pose_sample: tuple[np.ndarray, np.ndarray, float] | None = None
         self._stationary_since: float | None = None
         self._last_action_name: str | None = None
+        self._selected_object_type: str | None = None
         self._last_action_sent_time: float | None = None
         self._last_action_success: bool | None = None
         self._action_success_checks: dict = {}
@@ -281,12 +288,14 @@ class VLMClientNode(Node):
         planner_status_topic = str(self.get_parameter("planner_status_topic").value)
         planner_decision_topic = str(self.get_parameter("planner_decision_topic").value)
         self._retarget_timeout_sec = float(self.get_parameter("retarget_timeout_sec").value)
-        self._actual_box_pose_sub = self.create_subscription(
-            PoseStamped,
-            actual_box_pose_topic,
-            self._on_actual_box_pose,
-            10,
-        )
+        if self.mocap_object_selection:
+            validate_object_topics(*(self.resolve_topic_name(str(self.get_parameter(name).value)) for name in
+                                     ("tracked_box_pose_topic", "tracked_bucket_pose_topic", "actual_box_pose_topic")))
+            for kind in ("box", "bucket"):
+                self.create_subscription(PoseStamped, str(self.get_parameter(f"tracked_{kind}_pose_topic").value),
+                                         lambda msg, kind=kind: self._on_tracked_object(kind, msg), 10)
+        else:
+            self._actual_box_pose_sub = self.create_subscription(PoseStamped, actual_box_pose_topic, self._on_actual_box_pose, 10)
         self._robot_root_pose_sub = None
         if robot_root_pose_topic:
             self._robot_root_pose_sub = self.create_subscription(
@@ -308,6 +317,7 @@ class VLMClientNode(Node):
             10,
         )
         self._retarget_client = self.create_client(RetargetKeyframe, retarget_keyframe_service)
+        self._reset_retarget_task_client = self.create_client(Trigger, retarget_keyframe_service + "/reset_task")
         self._retargeted_keyframe_pub = self.create_publisher(UInt8MultiArray, retargeted_keyframe_topic, 10)
         self.supervised_mode = bool(self.get_parameter("supervised_mode").value)
         self._approved_preview_id = None
@@ -358,7 +368,7 @@ class VLMClientNode(Node):
 
     @staticmethod
     def _effective_object_to_manipulate(response: VLMQuery.Response) -> bool:
-        if response.next_keyframe == "approach":
+        if keyframe_phase(response.next_keyframe) == "approach":
             return False
         return (
             bool(response.object_in_manipulation)
@@ -460,6 +470,55 @@ class VLMClientNode(Node):
                 )
             )
         self._has_actual_box_pose = True
+
+    def _on_tracked_object(self, kind, msg):
+        if self._tracked_objects.update(kind, msg) and kind == self._selected_object_type:
+            self._on_actual_box_pose(msg)
+
+    def reset_retarget_task(self):
+        """Clear the previous task's pose latches without querying the VLM."""
+        if not self._reset_retarget_task_client.wait_for_service(timeout_sec=self._retarget_timeout_sec):
+            raise RuntimeError("Retargeter reset service unavailable; cannot safely initialize this object's task")
+        future = self._reset_retarget_task_client.call_async(Trigger.Request())
+        rclpy.spin_until_future_complete(self, future, timeout_sec=self._retarget_timeout_sec)
+        if not future.done() or future.result() is None or not future.result().success:
+            raise RuntimeError("Could not reset retargeter task pose latches")
+
+    def _route_keyframe_object(self, object_type):
+        """Use the normal decision's suffix, never tracking availability, as identity."""
+        selected = self._selected_object_type
+        if selected is not None and selected != object_type:
+            self.publish_status("object_type_mismatch", "Rejected object-library switch during an active task.")
+            return False
+        if selected is None:
+            self._selected_object_type = object_type
+            self._has_actual_box_pose = False
+            self._last_box_pose_sample = None
+            self._stationary_since = None
+        msg = self._tracked_objects.get(object_type)
+        if msg is None:
+            self.publish_status("missing_object_tracking", f"No fresh mocap pose for {object_type}; goal not sent")
+            return False
+        if not self._has_actual_box_pose:
+            self._on_actual_box_pose(msg)
+        return True
+
+    def wait_for_first_goal_tracking(self, response):
+        """Keep the first normal decision while its chosen object becomes ready."""
+        from lm.keyframe_modes import PLANNER_KEYFRAMES
+        if response.next_keyframe not in PLANNER_KEYFRAMES:
+            return False
+        self._route_keyframe_object(keyframe_object_type(response.next_keyframe))
+        self.publish_status(
+            "waiting_goal_tracking",
+            "Waiting for the chosen object's fresh pose and robot/object stationary hold",
+            keyframe=response.next_keyframe,
+        )
+        while rclpy.ok():
+            rclpy.spin_once(self, timeout_sec=0.1)
+            if self.robot_and_object_stationary():
+                return True
+        return False
 
     def _on_robot_root_pose(self, msg: PoseStamped) -> None:
         center, quat_wxyz = _pose_to_arrays(msg)
@@ -666,6 +725,8 @@ class VLMClientNode(Node):
         )
         object_stationary = (
             self._has_actual_box_pose
+            and (not getattr(self, "mocap_object_selection", False)
+                 or self._tracked_objects.get(self._selected_object_type) is not None)
             and self._object_linear_speed <= self._object_linear_stationary_threshold_mps
             and self._object_angular_speed <= self._object_angular_stationary_threshold_radps
         )
@@ -707,6 +768,17 @@ class VLMClientNode(Node):
         return body_ok, root_position_ok, root_orientation_ok, tracking_ready, metrics
 
     def ready_for_next_request(self) -> bool:
+        if getattr(self, "mocap_object_selection", False) and self._selected_object_type is None:
+            # No object has been chosen yet. Wait for the robot only; waiting
+            # for a selected object's pose here would deadlock the first query.
+            robot_stationary, _, _ = self._stationary_flags()
+            if not robot_stationary:
+                self._stationary_since = None
+                return False
+            now = time.monotonic()
+            if self._stationary_since is None:
+                self._stationary_since = now
+            return now - self._stationary_since >= self._stationary_hold_sec
         if not self.robot_and_object_stationary():
             return False
         if self._last_action_name is None or self._last_action_sent_time is None:
@@ -762,7 +834,8 @@ class VLMClientNode(Node):
             else self._current_box_center
         )
         target = source_center + self._default_place_distance_m * _GLOBAL_X_WORLD
-        target[2] = self._box_size_xyz[2] / 2.0
+        if getattr(self, "_selected_object_type", None) != "bucket":
+            target[2] = self._box_size_xyz[2] / 2.0
         return target
 
     def initialize_task_target_once(self) -> bool:
@@ -864,7 +937,7 @@ class VLMClientNode(Node):
             "root_orientation_error_rad": (root_orientation_error, self._root_orientation_success_threshold_rad),
             "object_position_error_m": (object_position_error, self._object_position_success_threshold_m),
         }
-        if self._last_action_name == "approach":
+        if keyframe_phase(self._last_action_name or "") == "approach":
             metrics.pop("object_position_error_m")
         self._action_success_checks = {
             name: {"value": value, "threshold": threshold, "passed": value is not None and value <= threshold}
@@ -873,7 +946,7 @@ class VLMClientNode(Node):
         generic_success = all(check["passed"] for check in self._action_success_checks.values())
         distance_context = self._distance_context()
         stand_before_pick_reach_success = bool(
-            self._last_action_name in ("approach", "stand_before_pick")
+            keyframe_phase(self._last_action_name or "") in ("approach", "stand_before_pick")
             and distance_context["pick_within_horizontal_reach"]
         )
         self._last_action_success = bool(generic_success or stand_before_pick_reach_success)
@@ -886,6 +959,23 @@ class VLMClientNode(Node):
         return object_position_error <= self._task_object_position_threshold_m
 
     def build_planner_context(self) -> str:
+        if getattr(self, "mocap_object_selection", False) and self._selected_object_type is None:
+            # This is a normal action request, not an object-selection query.
+            # Object identity comes only from task/image, not mocap labels/poses.
+            return json.dumps({
+                "selected_object_type": None,
+                "previous_action": "none",
+                "previous_action_finished": False,
+                "measured_task_completion": False,
+                "distance_context": {"pick_within_horizontal_reach": None},
+                "request_policy": (
+                    "The robot is stationary. Choose the next keyframe from the task text and image. "
+                    "Object distance is not yet available. Before pickup, choose approach_box or "
+                    "approach_bucket when reach is unknown. Never approach while holding an object. "
+                    "Keep task_completion false. The chosen action will be retargeted and sent "
+                    "through the normal execution/approval path."
+                ),
+            })
         robot_stationary, object_stationary, raw_stationary = self._stationary_flags()
         body_tracking_ready, root_position_ready, root_orientation_ready, tracking_ready, tracking_metrics = (
             self._tracking_error_flags()
@@ -893,6 +983,8 @@ class VLMClientNode(Node):
         finished = self.ready_for_next_request()
         success = self.evaluate_last_action_success() if finished else self._last_action_success
         context = {
+            "selected_object_type": getattr(self, "_selected_object_type", None),
+            "previous_action_phase": keyframe_phase(self._last_action_name or "none"),
             "previous_action": self._last_action_name or "none",
             "previous_action_finished": bool(finished),
             "previous_action_success": None if self._last_action_name is None else success,
@@ -942,7 +1034,8 @@ class VLMClientNode(Node):
                 "If previous_action_finished is true and previous_action_success is false, the previous keyframe stopped with tracking or object error above threshold. "
                 "Object success and task completion use box position only; object orientation errors are diagnostic and ignored. "
                 f"The approach and stand_before_pick actions are also successful when the robot root is within {self._pick_max_horizontal_distance_m:g} m in the XY plane of the current box center. "
-                "Use the image to check whether the robot is actually holding the box with two hands during object-aware carry/place phases, or whether the box has slipped, dropped, or is not controlled. "
+                "Choose the object library from the task text and image: _box for two-hand box motions, _bucket for right-hand bucket/handle motions. All phase names in these notes require that suffix. "
+                "Use the image to check the appropriate grasp (two hands for a box, right hand for a bucket) during carry/place phases, or whether the object has slipped, dropped, or is not controlled. "
                 f"Select crouch_to_pick only when distance_context.pick_within_horizontal_reach is true, meaning robot_to_object_xy_distance_m is at most {self._pick_max_horizontal_distance_m:g} m. "
                 f"Before pickup, if that distance is greater than {self._pick_max_horizontal_distance_m:g} m or unavailable, select approach (locomotion). Once within reach, select stand_before_pick to prepare the grasp. Never use approach while holding the box. "
                 "On failure, do not advance to the next semantic phase; retry the previous keyframe when safe, or choose a safe standing/setup keyframe before retrying. "
@@ -991,6 +1084,21 @@ class VLMClientNode(Node):
                 self._cancel_preview_pub.publish(String(data=token))
 
     def publish_planner_outputs(self, response: VLMQuery.Response) -> bool:
+        from lm.keyframe_modes import PLANNER_KEYFRAMES
+        if response.next_keyframe not in PLANNER_KEYFRAMES:
+            self.publish_status("invalid_keyframe", "Rejected unsuffixed or unknown VLM action")
+            return False
+        phase = keyframe_phase(response.next_keyframe)
+        object_type = keyframe_object_type(response.next_keyframe)
+        selected = getattr(self, "_selected_object_type", None)
+        if selected is not None and selected != object_type:
+            self.publish_status("object_type_mismatch", "Rejected object-library switch during an active task.")
+            return False
+        if getattr(self, "mocap_object_selection", False) and not self._route_keyframe_object(object_type):
+            return False
+        if object_type == "bucket" and selected is None and self._task_target_box_center is not None:
+            # Bucket poses use the mesh base, not a box centre at half height.
+            self._task_target_box_center[2] = self._fixed_start_box_pose()[0][2]
         if not self._has_actual_box_pose:
             self.get_logger().error("Cannot publish planner outputs without an actual box pose.")
             self.publish_status("missing_actual_box_pose", "Cannot publish planner outputs without an actual box pose")
@@ -1013,17 +1121,17 @@ class VLMClientNode(Node):
         start_box_center, start_box_quat = self._fixed_start_box_pose()
         retarget_current_box_source = (
             "fixed_start_box_pose"
-            if response.next_keyframe in _PICK_POSE_KEYFRAMES
+            if phase in _PICK_POSE_KEYFRAMES
             else "current_box_pose"
         )
         retarget_current_box_center = (
             start_box_center
-            if response.next_keyframe in _PICK_POSE_KEYFRAMES
+            if phase in _PICK_POSE_KEYFRAMES
             else self._current_box_center
         )
         retarget_current_box_quat = (
             start_box_quat
-            if response.next_keyframe in _PICK_POSE_KEYFRAMES
+            if phase in _PICK_POSE_KEYFRAMES
             else self._current_box_quat_wxyz
         )
         current_box_pose_msg = self._pose_stamped_from(
@@ -1056,11 +1164,13 @@ class VLMClientNode(Node):
 
         target_root_center = self._default_target_root_center.copy()
         target_root_quat = self._default_target_root_quat_wxyz.copy()
-        if response.next_keyframe == "approach":
+        # Bucket stand-before-pick ignores this root hint: the retargeter places
+        # the library's left-offset stance relative to the observed bucket.
+        if phase == "approach":
             target_root_center, target_root_quat = self._approach_root_pose()
-        elif response.next_keyframe == "stand_before_pick":
+        elif phase == "stand_before_pick" and object_type == "box":
             target_root_center, target_root_quat = self._stand_before_pick_root_pose()
-        elif response.next_keyframe == "stand_after_place":
+        elif phase == "stand_after_place":
             if self._has_robot_root_pose or self._has_monitor:
                 target_root_center = self._current_robot_center.copy()
                 target_root_quat = self._current_robot_quat_wxyz.copy()
@@ -1117,6 +1227,7 @@ class VLMClientNode(Node):
             self._retargeted_info_pub.publish(info_msg)
 
         self._last_action_name = response.next_keyframe
+        self._selected_object_type = object_type
         self._last_action_sent_time = time.monotonic()
         self._last_action_success = None
         self._action_success_checks = {}
@@ -1172,7 +1283,9 @@ def main(args: list[str] | None = None) -> None:
     try:
         node.publish_status("connected", "VLM planner client started")
         task = parsed.task.strip() if parsed.task else "Pick up the box on the ground and place it 1m at the front."
-        if not node.wait_for_actual_box_pose(float(node.get_parameter("actual_box_pose_timeout_sec").value)):
+        if node.mocap_object_selection:
+            node.reset_retarget_task()
+        if not node.mocap_object_selection and not node.wait_for_actual_box_pose(float(node.get_parameter("actual_box_pose_timeout_sec").value)):
             node.publish_status(
                 "missing_start_box_pose",
                 "Cannot start VLM planner until the starting box pose has been received.",
@@ -1184,7 +1297,7 @@ def main(args: list[str] | None = None) -> None:
                 "Cannot determine the desired pickup approach without a robot root pose.",
             )
             raise RuntimeError("Cannot initialize pickup approach without robot root pose")
-        if not node.initialize_task_target_once():
+        if not node.mocap_object_selection and not node.initialize_task_target_once():
             node.publish_status(
                 "missing_task_target",
                 "Cannot start VLM planner until the fixed target box pose is initialized.",
@@ -1247,7 +1360,13 @@ def main(args: list[str] | None = None) -> None:
                 latency_sec=float(response.latency_sec),
                 task_completion=bool(response.task_completion),
             )
-            node.wait_for_actual_box_pose(float(node.get_parameter("actual_box_pose_timeout_sec").value))
+            if node.mocap_object_selection and node._selected_object_type is None:
+                # Keep this normal action, rather than sending another VLM
+                # request after binding the chosen object's measured pose.
+                if not node.wait_for_first_goal_tracking(response):
+                    break
+            if not node.mocap_object_selection:
+                node.wait_for_actual_box_pose(float(node.get_parameter("actual_box_pose_timeout_sec").value))
             node.wait_for_robot_pose(float(node.get_parameter("monitor_timeout_sec").value))
             published = node.publish_planner_outputs(response)
             node.publish_decision(response, published)

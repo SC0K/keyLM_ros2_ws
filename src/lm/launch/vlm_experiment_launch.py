@@ -34,6 +34,11 @@ def _robot_launch(context):
             "current_object_pose_topic": LaunchConfiguration("actual_box_pose_topic"),
             "retargeted_keyframe_topic": LaunchConfiguration("retargeted_keyframe_topic"),
             "supervised_mode": LaunchConfiguration("supervised_mode"),
+            "scene_object": LaunchConfiguration("scene_object"),
+            "mocap_object_selection": LaunchConfiguration("mocap_object_selection"),
+            "tracked_box_pose_topic": LaunchConfiguration("tracked_box_pose_topic"),
+            "tracked_bucket_pose_topic": LaunchConfiguration("tracked_bucket_pose_topic"),
+            "tracked_object_timeout_sec": LaunchConfiguration("tracked_object_timeout_sec"),
         }.items(),
     )]
 
@@ -49,10 +54,13 @@ def _planner_app(context):
     parameters = {name: ParameterValue(value(name), value_type=str) for name in (
         "monitor_topic", "actual_box_pose_topic", "robot_root_pose_topic", "tracking_error_topic",
         "retarget_keyframe_service", "retargeted_keyframe_topic", "retargeted_info_topic",
+        "tracked_box_pose_topic", "tracked_bucket_pose_topic",
     )}
     parameters["box_size_xyz"] = parse_box_size_xyz(value("box_size_xyz")).tolist()
     parameters["stand_before_pick_distance_m"] = float(value("stand_before_pick_distance_m"))
     parameters["supervised_mode"] = IfCondition(LaunchConfiguration("supervised_mode")).evaluate(context)
+    parameters["mocap_object_selection"] = IfCondition(LaunchConfiguration("mocap_object_selection")).evaluate(context)
+    parameters["tracked_object_timeout_sec"] = float(value("tracked_object_timeout_sec"))
     # Send the axis as a quoted CLI literal (ROS Humble interprets bare YAML y
     # as boolean even when the launch parameter is explicitly typed as str).
     arguments += ["--ros-args", "-p", "default_box_forward_axis:=" + repr(value("box_hold_forward_axis"))]
@@ -68,6 +76,9 @@ def generate_launch_description():
                               description="Start robot/controller and monitor. False if already running."),
         DeclareLaunchArgument("supervised_mode", default_value="false",
                               description="Preview VLM goals; approve with N in the monitor or R1+A."),
+        DeclareLaunchArgument("scene_object", default_value="box", choices=["box", "bucket"],
+                              description="Physical/visualized object for this experiment, not the VLM's library decision."),
+        DeclareLaunchArgument("mocap_object_selection", default_value=_mode_default("false", "true")),
         DeclareLaunchArgument("server", default_value=DEFAULT_SERVER, choices=list(SERVER_PROFILES)),
         DeclareLaunchArgument("manage_tunnel", default_value="true",
                               description="Let the GUI manage SSH. False for an existing external tunnel."),

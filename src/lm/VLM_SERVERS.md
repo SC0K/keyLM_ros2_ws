@@ -41,6 +41,93 @@ planner/tunnel; an externally managed tunnel is not stopped. GUI **Stop** stops
 planning only, not the robot controller; use the robot's normal safety controls
 to stop motion. A display and working noninteractive SSH login are required.
 
+## Box and bucket tasks
+
+The library in `lm/keyframes/` now contains six `*_box.npz` frames and six
+`*_bucket.npz` frames. The box files were renamed without changing their
+contents. Bucket files were converted from `resource/test_sequence_bucket`:
+full robot FK and 29 named joints replace the raw export format, retaining
+authored joint poses, heights and robot/object relative geometry. The original
+bucket exports are unchanged.
+
+The VLM receives both libraries, the camera image and task text. It selects one
+of seven phases with an explicit object suffix, e.g. `crouch_to_pick_box` or
+`crouch_to_pick_bucket`. `approach_box` and `approach_bucket` reuse the respective
+pickup stand, retaining the 0.30 m XY offset and locomotion/object masking.
+The other six phases remain object-aware. The JSON fields are unchanged:
+`next_keyframe`, `object_in_manipulation`, `task_completion`.
+
+The selected suffix automatically chooses the retargeter behavior: box semantic
+axes/two-hand grasp or bucket physical axes/right-hand grasp without scaling.
+IK remains disabled by default for both. Root/object heights stay authored;
+setup/final stands use the existing generated standing behavior. Once a task
+has an accepted goal, changing object families mid-task is rejected. Start a
+new task to manipulate a different object.
+
+For `stand_before_pick_bucket`, placement comes from the library's root-to-bucket
+offset and heading: the bucket is approximately 0.407 m forward and 0.164 m to
+the robot's right. This offset rotates with the bucket; it is not a fixed world-Y
+shift. The generated standing joint posture/lean and authored heights remain
+unchanged. Box pickup still uses the configured centred stance. `approach_bucket`
+and final standing placement are unchanged.
+
+For a simulated bucket experiment:
+
+```bash
+ros2 launch lm vlm_experiment_launch.py mode:=sim server:=tars scene_object:=bucket
+```
+
+Enter a bucket task in the GUI and press Start. `scene_object` selects the actual
+simulation/monitor/camera mesh and its initial pose; it does not decide the VLM
+keyframe. `scene_object:=box` is the default. Both support the supervision checkbox.
+
+For the real robot with a bucket and USB camera:
+
+```bash
+ros2 launch lm vlm_experiment_launch.py mode:=real server:=tars scene_object:=bucket
+```
+
+Real mode starts hardware. `mocap_object_selection:=true` is retained as the
+compatibility parameter for local pose routing, not a separate VLM selection step.
+The first normal VLM action chooses the object from image+text; its `_box` or
+`_bucket` suffix routes the matching mocap stream for retargeting and policy
+observations. That action follows the normal execution/supervised-approval path.
+No mocap availability list or candidate-object poses are sent to the VLM. Later
+requests include the selected object's measured distances and the previously
+chosen type. Both objects may be tracked simultaneously; the selected family
+stays fixed for that task. Before the first choice, startup waits for the robot
+to be stationary without requiring an object pose; missing selected tracking
+still blocks goal execution.
+
+| Object | Raw mocap input parameter/default | Converted pose topic |
+| --- | --- | --- |
+| Box | `optitrack_box_pose_topic:=/optitrack_dispatcher/rigidbodies/carton_box` | `/mocap/box_pose` |
+| Bucket | `optitrack_bucket_pose_topic:=/optitrack_dispatcher/rigidbodies/bucket` | `/mocap/bucket_pose` |
+
+The dispatcher configuration currently contains `carton_box` but no `bucket`
+mapping. Configure the actual bucket rigid-body ID/name in the OptiTrack config,
+or override `optitrack_bucket_pose_topic` with its existing topic. Never map the
+box and bucket to the same tracked object. Both poses must already be calibrated
+into the robot's world coordinates; bucket poses use the mesh-base origin, not
+a box-centre origin. The bridges reject invalid NatNet tracking flags.
+
+The policy controller chooses its object observations from the accepted goal's
+`object_type`. During supervised preview it retains the previous active object's
+observations; switching occurs only on approval. The controller also forwards
+that active pose on `actual_box_pose_topic` (legacy name, default
+`/actual_box_pose`) for the GUI/monitor. It continues forwarding after the planner
+stops. Missing/stale selected tracking blocks new goals/approval instead of
+falling back to the other object (`tracked_object_timeout_sec`, default 1 s).
+
+`scene_object` still controls the monitor mesh, not real mocap selection. The
+GUI's 2D outline is schematic. Simulation remains single-object by default, with
+its simulator pose input (`mocap_object_selection:=false`). For externally
+converted poses, set `start_object_pose_bridge:=false` and configure
+`tracked_box_pose_topic` and `tracked_bucket_pose_topic` consistently.
+
+Only the 14 explicit `_box`/`_bucket` action names are allowed by the VLM schema,
+planner goal output and public retargeter service. Unsuffixed names are rejected.
+
 ## Supervised goal approval
 
 Add `supervised_mode:=true` to the combined launch in either mode:
@@ -201,7 +288,7 @@ The controller's idle waiting stand (before any VLM goal) uses default joint
 angles with **no added lean**, in no-object mode. This is independent of the
 standing-lean setting below.
 
-The VLM `stand_before_pick` / `stand_after_place`
+The VLM `stand_before_pick_box` / `stand_after_place_box` and their `_bucket` counterparts
 goals use `default_angles` from `g1_keyframe_tracking_obj.yaml` plus
 `standing_waist_pitch_deg` (default **5 degrees forward**, defined by
 `VLM_STANDING_LEAN_DEG` in `lm/generated_stand.py`) and upright root yaw.
@@ -212,25 +299,26 @@ VLM stands keep the root
 height from their library keyframe; the controller's waiting/test stands retain
 their separately configured standing height.
 These two VLM stands no longer use the library's authored joint pose. Object
-goals remain present in manipulation mode. `stand_before_pick` is restored to
+goals remain present in manipulation mode. `stand_before_pick_box` has
 `object_to_manipulate=true`, with its pickup stance 0.4 m from the box centre.
+The bucket pickup stand instead retains its library's left-offset stance.
 
-The separate **`approach`** action always has `object_to_manipulate=false`.
-It reuses `stand_before_pick.npz` (no separate NPZ to edit). The retargeter places
-that library robot pose **0.30 m from the current box centre in XY, on the
+The separate **`approach_box` / `approach_bucket`** actions always have `object_to_manipulate=false`.
+They reuse `stand_before_pick_box.npz` / `stand_before_pick_bucket.npz` (no separate NPZ to edit).
+The retargeter places that library robot pose **0.30 m from the current object origin in XY, on the
 robot-facing side**, preserves its root
-height, faces the box, and zeroes the target object pose. The controller then
+height, faces the object, and zeroes the target object pose. The controller then
 overwrites the robot posture through its existing walking-goal
 path: default joint posture with configured walking-goal noise, measured and
 target object inputs masked out. The offset is `APPROACH_XY_OFFSET_M` in
 `lm/vml.py`; it is a centre-to-root XY distance, not clearance from the box
 surface. This is not a collision-avoiding path or the separate 0.4 m pickup stance.
-The VLM is instructed to choose `approach` when too far away, then
-`stand_before_pick` once within 0.45 m XY reach, then the normal pickup sequence.
-Never use `approach` while holding the box. Mode is fixed locally in
+The VLM is instructed to choose the suffixed approach when too far away, then
+the matching pickup stand once within 0.45 m XY reach, then the normal pickup sequence.
+Never use approach while holding an object. Mode is fixed locally in
 `lm/keyframe_modes.py`, independent of the model's returned object flag; all six
-pick/place goals remain manipulation goals. JSON fields stay unchanged, with
-`approach` added to the allowed names. Locomotion success checks omit object
+pick/place phases remain manipulation goals. JSON fields stay unchanged; only
+the 14 suffixed action names are allowed. Locomotion success checks omit object
 tracking and accept reaching the pickup range.
 Set the lean to 0 for upright manipulation stands. If the controller uses
 a different policy config, pass that same path as `standing_config_file:=...`

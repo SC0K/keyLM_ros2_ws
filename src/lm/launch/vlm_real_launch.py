@@ -14,6 +14,7 @@ def generate_launch_description():
     # arguments (device, image topic, server/model, retargeter, task) remain usable.
     return LaunchDescription([
         DeclareLaunchArgument("camera_backend", default_value="usb"),
+        DeclareLaunchArgument("mocap_object_selection", default_value="true"),
         DeclareLaunchArgument("monitor_topic", default_value="/g1_hardware/monitor"),
         DeclareLaunchArgument("camera_frame_id", default_value="usb_camera_optical_frame"),
         DeclareLaunchArgument("start_client", default_value="false",
