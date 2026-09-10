@@ -609,7 +609,9 @@ class KeyframeRetargeterNode(Node):
                     )
                 )
 
-            if keyframe_phase(keyframe_name) in _PICK_POSE_KEYFRAMES:
+            # Pre-pick goals use the latest observation in this request. Keep
+            # the lift anchored so its height offset is not applied twice.
+            if keyframe_phase(keyframe_name) == "stand_after_pick":
                 self._current_box_center = self._fixed_start_box_center.copy()
                 self._current_box_quat_wxyz = (
                     self._fixed_start_box_quat_wxyz.copy()

@@ -15,22 +15,25 @@ def test_tars_is_default():
     assert args.server == "tars"
     cmd = ssh_tunnel_command(args.server, host=args.host, remote_port=args.remote_port)
     assert cmd[-2:] == ["11434:localhost:11434", "sitchen@tars"]
+    assert "-p" not in cmd
 
 
 def test_case_profile_and_explicit_overrides():
     args = build_arg_parser().parse_args(["--server", "case"])
     assert ssh_tunnel_command(args.server)[-2:] == [
-        "11434:localhost:8001", "sitchen@case.inf.ethz.ch"
+        "11434:localhost:11434", "sitchen@case.inf.ethz.ch"
     ]
     cmd = ssh_tunnel_command("case", host="custom-host", remote_port=12345,
                              local_port=11435, user="tester")
     assert cmd[-2:] == ["11435:localhost:12345", "tester@custom-host"]
     assert build_arg_parser().parse_args(["--no-tunnel"]).no_tunnel
+    assert "-p" not in ssh_tunnel_command("case")
 
 
 def test_tailscale_profile_uses_its_own_user_and_ollama_port():
     args = build_arg_parser().parse_args(["--server", "tailscale"])
     assert args.user is None
+    assert ssh_tunnel_command(args.server)[:3] == ["ssh", "-p", "2222"]
     assert ssh_tunnel_command(args.server, user=args.user)[-2:] == [
         "11434:localhost:11434", "sitongchen@100.99.254.46"]
     assert ssh_tunnel_command("tailscale", user="custom", local_port=11435)[-2:] == [

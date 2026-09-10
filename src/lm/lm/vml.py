@@ -39,7 +39,7 @@ _AXIS_TO_LOCAL_VEC = {
 
 _GLOBAL_X_WORLD = np.array([1.0, 0.0, 0.0], dtype=np.float64)
 APPROACH_XY_OFFSET_M = 0.30
-_PICK_POSE_KEYFRAMES = frozenset({"stand_before_pick", "crouch_to_pick", "stand_after_pick"})
+_FIXED_START_POSE_KEYFRAMES = frozenset({"stand_after_pick"})
 
 
 def published_goal_targets(data) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -207,7 +207,7 @@ class VLMClientNode(Node):
         self.declare_parameter("root_orientation_success_threshold_rad", 0.8)
         self.declare_parameter("object_position_success_threshold_m", 0.45)
         self.declare_parameter("object_orientation_success_threshold_rad", 1.00)
-        self.declare_parameter("task_object_position_threshold_m", 0.45)
+        self.declare_parameter("task_object_position_threshold_m", 0.60)
         self.declare_parameter("task_object_orientation_threshold_rad", 5.00)
 
         self._current_box_center = np.zeros(3, dtype=np.float64)
@@ -633,7 +633,8 @@ class VLMClientNode(Node):
         if not (self._has_robot_root_pose or self._has_monitor):
             raise RuntimeError("Cannot compute a pickup approach without a robot root pose")
 
-        start_box_center, start_box_quat = self._fixed_start_box_pose()
+        start_box_center = self._current_box_center.copy()
+        start_box_quat = self._current_box_quat_wxyz.copy()
         rot = _quat_wxyz_to_rotmat(start_box_quat)
         hx = 0.5 * float(self._box_size_xyz[0])
         hy = 0.5 * float(self._box_size_xyz[1])
@@ -707,7 +708,7 @@ class VLMClientNode(Node):
 
         pickup_root_center, pickup_root_quat = self._stand_before_pick_root_pose()
         pickup_forward_world = _quat_wxyz_to_rotmat(pickup_root_quat)[:, 0]
-        _, start_box_quat = self._fixed_start_box_pose()
+        start_box_quat = self._current_box_quat_wxyz.copy()
         self.box_forward_axis = _infer_axis_label_from_world_dir(
             start_box_quat,
             pickup_forward_world,
@@ -1139,17 +1140,17 @@ class VLMClientNode(Node):
         start_box_center, start_box_quat = self._fixed_start_box_pose()
         retarget_current_box_source = (
             "fixed_start_box_pose"
-            if phase in _PICK_POSE_KEYFRAMES
+            if phase in _FIXED_START_POSE_KEYFRAMES
             else "current_box_pose"
         )
         retarget_current_box_center = (
             start_box_center
-            if phase in _PICK_POSE_KEYFRAMES
+            if phase in _FIXED_START_POSE_KEYFRAMES
             else self._current_box_center
         )
         retarget_current_box_quat = (
             start_box_quat
-            if phase in _PICK_POSE_KEYFRAMES
+            if phase in _FIXED_START_POSE_KEYFRAMES
             else self._current_box_quat_wxyz
         )
         current_box_pose_msg = self._pose_stamped_from(

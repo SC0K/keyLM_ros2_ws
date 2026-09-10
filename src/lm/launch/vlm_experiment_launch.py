@@ -78,7 +78,7 @@ def generate_launch_description():
                               description="Preview VLM goals; approve with N in the monitor or R1+A."),
         DeclareLaunchArgument("scene_object", default_value="box", choices=["box", "bucket"],
                               description="Physical/visualized object for this experiment, not the VLM's library decision."),
-        DeclareLaunchArgument("mocap_object_selection", default_value=_mode_default("false", "true")),
+        DeclareLaunchArgument("mocap_object_selection", default_value="false"),
         DeclareLaunchArgument("server", default_value=DEFAULT_SERVER, choices=list(SERVER_PROFILES)),
         DeclareLaunchArgument("manage_tunnel", default_value="true",
                               description="Let the GUI manage SSH. False for an existing external tunnel."),

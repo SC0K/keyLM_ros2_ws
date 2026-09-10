@@ -31,7 +31,7 @@ def test_dropdown_replaces_only_owned_tunnel_and_uses_case_profile():
     old_tunnel.wait.assert_called_once_with(timeout=2.0)
     app.root.after_cancel.assert_called_once_with("pending-check")
     assert app.args.server == "case"
-    assert (app.tunnel_host, app.tunnel_remote_port) == ("case.inf.ethz.ch", 8001)
+    assert (app.tunnel_host, app.tunnel_remote_port) == ("case.inf.ethz.ch", 11434)
     assert app.args.host is None and app.args.remote_port is None
     assert (app.args.local_port, app.args.user) == (11435, "custom-user")
     app._start_tunnel.assert_called_once()

@@ -7,7 +7,7 @@ DEFAULT_MODEL = "qwen3.6:27b"
 SERVER_PROFILES = {
     # SSH host, remote Ollama port, default SSH user.
     "tars": ("tars", 11434, "sitchen"),
-    "case": ("case.inf.ethz.ch", 8001, "sitchen"),
+    "case": ("case.inf.ethz.ch", 11434, "sitchen"),
     "tailscale": ("100.99.254.46", 11434, "sitongchen"),
 }
 
@@ -26,7 +26,8 @@ def ssh_tunnel_command(server=DEFAULT_SERVER, *, user=None,
     if not (1 <= local_port <= 65535 and 1 <= remote_port <= 65535):
         raise ValueError("Tunnel ports must be between 1 and 65535")
     return [
-        "ssh", "-N", "-o", "ExitOnForwardFailure=yes",
+        "ssh", *(["-p", "2222"] if server == "tailscale" else []),
+        "-N", "-o", "ExitOnForwardFailure=yes",
         "-o", "ServerAliveInterval=30", "-L",
         f"{local_port}:localhost:{remote_port}", f"{user}@{host}",
     ]
