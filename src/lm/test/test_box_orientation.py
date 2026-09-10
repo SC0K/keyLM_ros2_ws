@@ -81,6 +81,38 @@ def test_vlm_latches_the_nominal_physical_target_once() -> None:
     np.testing.assert_array_equal(node._task_target_box_quat_wxyz, latched)
 
 
+@pytest.mark.parametrize("preinitialized_sim_target", [False, True])
+def test_bucket_task_keeps_observed_heading_instead_of_default_or_nearest_face(preinitialized_sim_target):
+    from unittest.mock import Mock
+    from lm.vml import VLMClientNode
+
+    node = VLMClientNode.__new__(VLMClientNode)
+    node._selected_object_type = None if preinitialized_sim_target else "bucket"
+    node._task_target_box_center = np.array([2., 1., .15]) if preinitialized_sim_target else None
+    node._task_target_box_quat_wxyz = np.array([1., 0., 0., 0.]) if preinitialized_sim_target else None
+    node._has_actual_box_pose = node._has_robot_root_pose = True
+    start = np.array([1., 1., .02])
+    observed = quat_wxyz_from_rpy_deg(np.array([0., 0., 73.]))
+    node._fixed_start_box_pose = lambda: (start.copy(), observed.copy())
+    node._default_task_target_box_center = lambda: np.array([2., 1., .02])
+    node._default_target_box_quat_wxyz = np.array([1., 0., 0., 0.])
+    node._box_forward_axis_initialized_from_robot = True
+    node.box_forward_axis = "-y"
+    node._stand_before_pick_root_pose = Mock(side_effect=AssertionError("No bucket face-to-centre alignment"))
+    node.get_logger = Mock(return_value=Mock())
+    node.publish_status = Mock()
+
+    assert node.initialize_task_target_once("bucket")
+    np.testing.assert_allclose(node._task_target_box_quat_wxyz, observed)
+    np.testing.assert_allclose(node._task_target_box_center, [2., 1., .02])
+    assert node.box_forward_axis == "x"
+    # Later observations must not make a fixed placement target drift.
+    latched = node._task_target_box_quat_wxyz.copy()
+    observed[:] = [1., 0., 0., 0.]
+    assert node.initialize_task_target_once("bucket")
+    np.testing.assert_array_equal(node._task_target_box_quat_wxyz, latched)
+
+
 @pytest.mark.parametrize("source_height", [0.73, 0.9336])
 def test_vlm_retargeter_applies_offset_only_after_robot_ik(source_height) -> None:
     """The VLM path sends physical orientation to IK and offsets only its goal."""

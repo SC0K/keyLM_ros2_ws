@@ -28,6 +28,18 @@ def test_case_profile_and_explicit_overrides():
     assert build_arg_parser().parse_args(["--no-tunnel"]).no_tunnel
 
 
+def test_tailscale_profile_uses_its_own_user_and_ollama_port():
+    args = build_arg_parser().parse_args(["--server", "tailscale"])
+    assert args.user is None
+    assert ssh_tunnel_command(args.server, user=args.user)[-2:] == [
+        "11434:localhost:11434", "sitongchen@100.99.254.46"]
+    assert ssh_tunnel_command("tailscale", user="custom", local_port=11435)[-2:] == [
+        "11435:localhost:11434", "custom@100.99.254.46"]
+    # Selecting another profile must restore its user, not retain sitongchen.
+    args.server = "tars"
+    assert ssh_tunnel_command(args.server, user=args.user)[-1] == "sitchen@tars"
+
+
 def test_query_uses_configured_client_and_model():
     node = VLMServiceNode.__new__(VLMServiceNode)
     node._model_name = "server-specific-model"

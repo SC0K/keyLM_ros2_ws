@@ -501,7 +501,8 @@ class VLMPlannerApp:
         self.tunnel_proc = None
         if selected != self.args.server:
             # An explicit GUI profile selection replaces CLI destination
-            # overrides, but retains the chosen SSH user and local port.
+            # overrides, but retains an explicit SSH user and local port.
+            # With no --user override, the selected profile supplies the user.
             self.args.host = self.args.remote_port = None
         self.args.server = selected
         self.tunnel_host, self.tunnel_remote_port = tunnel_destination(
@@ -546,7 +547,7 @@ class VLMPlannerApp:
         self.tunnel_status.set(f"Tunnel: starting localhost:{self.args.local_port}")
         self._append_status(
             "tunnel", f"Forwarding localhost:{self.args.local_port} to "
-            f"{self.args.user}@{self.tunnel_host}:localhost:{self.tunnel_remote_port}"
+            f"{cmd[-1]}:localhost:{self.tunnel_remote_port}"
         )
         self._read_stream(self.tunnel_proc.stderr, "tunnel")
         self._tunnel_check_id = self.root.after(1000, self._check_tunnel_started)
@@ -979,11 +980,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--poll-period", type=float, default=0.1, help="Readiness poll period for spawned planner client")
     parser.add_argument("--no-tunnel", action="store_true", help="Do not start the SSH tunnel")
     parser.add_argument("--server", choices=SERVER_PROFILES, default=DEFAULT_SERVER,
-                        help="Tunnel profile: tars (default, remote 11434) or case (remote 8001)")
+                        help="Tunnel profile: tars (default), case, or tailscale (100.99.254.46)")
     parser.add_argument("--local-port", type=int, default=DEFAULT_LOCAL_PORT, help="Local tunnel port")
     parser.add_argument("--remote-port", type=int, default=None, help="Override the profile's remote port")
     parser.add_argument("--host", default=None, help="Override the profile's SSH host")
-    parser.add_argument("--user", default="sitchen", help="SSH tunnel user")
+    parser.add_argument("--user", default=None, help="Override the profile's SSH user")
     return parser
 
 

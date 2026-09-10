@@ -127,6 +127,31 @@ def test_bucket_right_hand_target_ignores_box_dimensions(retargeter):
     np.testing.assert_allclose(result.hand_targets, current_hand)
 
 
+@pytest.mark.parametrize("yaw", [0., .7, -1.4, np.pi])
+@pytest.mark.parametrize("target_xy", [[2., -1.], [-3., 4.]])
+def test_bucket_before_place_heading_follows_bucket_not_bearing(retargeter, yaw, target_xy):
+    source = retargeter._load_payload("stand_before_place_bucket")
+    pelvis = list(source["body_names"]).index("pelvis")
+    source_box_rotation = _quat_wxyz_to_rotmat(source["object_quat_wxyz"])
+    source_yaw = np.arctan2(source_box_rotation[1, 0], source_box_rotation[0, 0])
+    retargeter._target_box_quat_wxyz = _yaw_to_quat_wxyz(yaw)
+    retargeter._target_box_center[:2] = target_xy
+    # A conflicting root hint must not make the robot look toward the bucket.
+    retargeter._target_root_quat_wxyz = _yaw_to_quat_wxyz(yaw + 1.2)
+    blob, _ = retargeter._process_keyframe("stand_before_place_bucket", True)
+    rotation = _quat_wxyz_to_rotmat(_yaw_to_quat_wxyz(yaw - source_yaw))
+    with np.load(BytesIO(blob), allow_pickle=True) as result:
+        np.testing.assert_allclose(
+            _quat_wxyz_to_rotmat(result["body_rotations"][pelvis]),
+            rotation @ _quat_wxyz_to_rotmat(source["body_rotations"][pelvis]), atol=1e-6)
+        np.testing.assert_allclose(
+            (result["body_positions"][pelvis] - result["object_position_xyz"])[:2],
+            (rotation @ (source["body_positions"][pelvis] - source["object_position_xyz"]))[:2], atol=1e-6)
+        np.testing.assert_array_equal(result["dof_positions"], source["dof_positions"])
+        np.testing.assert_array_equal(result["body_positions"][:, 2], source["body_positions"][:, 2])
+        assert result["object_position_xyz"][2] == source["object_position_xyz"][2]
+
+
 @pytest.fixture
 def retargeter():
     node = KeyframeRetargeterNode.__new__(KeyframeRetargeterNode)

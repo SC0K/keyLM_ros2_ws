@@ -686,6 +686,12 @@ class VLMClientNode(Node):
 
     def _update_box_forward_axis_from_robot_once(self) -> bool:
         """Latch the physical box axis aligned with the desired pickup approach."""
+        if getattr(self, "_selected_object_type", None) == "bucket":
+            # Bucket motions use the physical +X frame and the library's
+            # right-hand/lateral stance, not a box face nearest to the robot.
+            self.box_forward_axis = "x"
+            self._box_forward_axis_initialized_from_robot = True
+            return True
         if self._box_forward_axis_initialized_from_robot:
             return True
         if not self._has_actual_box_pose:
@@ -838,7 +844,17 @@ class VLMClientNode(Node):
             target[2] = self._box_size_xyz[2] / 2.0
         return target
 
-    def initialize_task_target_once(self) -> bool:
+    def initialize_task_target_once(self, object_type: str | None = None) -> bool:
+        if object_type is not None and getattr(self, "_selected_object_type", None) is None:
+            self._selected_object_type = object_type
+            if object_type == "bucket" and self._task_target_box_center is not None:
+                # Single-object sim may initialize a generic target before the
+                # first VLM decision. Bind it to the bucket once that decision
+                # arrives, before sending any request to the retargeter.
+                start_center, start_quat = self._fixed_start_box_pose()
+                self._task_target_box_center[2] = start_center[2]
+                self._task_target_box_quat_wxyz = _normalize_quat_wxyz(start_quat)
+                self._update_box_forward_axis_from_robot_once()
         if self._task_target_box_center is not None:
             return True
         if not self._has_actual_box_pose or not (self._has_robot_root_pose or self._has_monitor):
@@ -847,8 +863,13 @@ class VLMClientNode(Node):
         if not self._update_box_forward_axis_from_robot_once():
             return False
         self._task_target_box_center = self._default_task_target_box_center()
+        # Keep the bucket's observed starting orientation through carry/place.
+        # The retargeter preserves the authored robot-to-bucket heading and
+        # lateral offset; do not introduce a turn toward the bucket or world X.
         nominal_target_quat = _normalize_quat_wxyz(
-            self._default_target_box_quat_wxyz.copy()
+            self._fixed_start_box_pose()[1]
+            if getattr(self, "_selected_object_type", None) == "bucket"
+            else self._default_target_box_quat_wxyz.copy()
         )
         # This is the physical placement orientation used by geometric
         # retargeting and task-success checks.  Any policy-only correction is
@@ -1096,9 +1117,6 @@ class VLMClientNode(Node):
             return False
         if getattr(self, "mocap_object_selection", False) and not self._route_keyframe_object(object_type):
             return False
-        if object_type == "bucket" and selected is None and self._task_target_box_center is not None:
-            # Bucket poses use the mesh base, not a box centre at half height.
-            self._task_target_box_center[2] = self._fixed_start_box_pose()[0][2]
         if not self._has_actual_box_pose:
             self.get_logger().error("Cannot publish planner outputs without an actual box pose.")
             self.publish_status("missing_actual_box_pose", "Cannot publish planner outputs without an actual box pose")
@@ -1141,7 +1159,7 @@ class VLMClientNode(Node):
             frame_id=pose_frame_id,
         )
 
-        if not self.initialize_task_target_once():
+        if not self.initialize_task_target_once(object_type):
             self.get_logger().error("Cannot publish planner outputs without a fixed task target box position.")
             self.publish_status(
                 "missing_task_target",

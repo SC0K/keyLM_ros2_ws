@@ -21,9 +21,11 @@ task automatically: enter the task in the GUI and press **Start** when ready.
 The GUI owns the single planner subprocess; do not run another planner or GUI.
 This uses the VLM robot launches, not the fixed-sequence test launches.
 
-Use `server:=case` for CASE. The GUI's **VLM server** dropdown also switches between
-TARS and CASE: stop the planner first, then select the server. It replaces only
-the GUI-owned tunnel, retaining the local port and SSH user. **Connect / retry**
+Use `server:=case` for CASE or `server:=tailscale` for the Ollama server at
+`100.99.254.46`. The GUI's **VLM server** dropdown switches between TARS, CASE and
+Tailscale: stop the planner first, then select the server. It replaces only
+the GUI-owned tunnel, retaining the local port and any explicit `--user`
+override; otherwise the SSH user follows the profile. **Connect / retry**
 retries a failed connection. Selecting a different profile clears any custom
 CLI SSH host/remote-port overrides. External tunnels are never stopped or
 switched by the GUI; change those manually.
@@ -70,6 +72,13 @@ the robot's right. This offset rotates with the bucket; it is not a fixed world-
 shift. The generated standing joint posture/lean and authored heights remain
 unchanged. Box pickup still uses the configured centred stance. `approach_bucket`
 and final standing placement are unchanged.
+
+Bucket carry/place goals retain the bucket's observed starting orientation as
+the fixed placement orientation, rather than resetting it to the default world
+orientation. `stand_before_place_bucket` keeps the library's relative root
+heading and right-hand lateral offset; it does not turn the robot to face the
+bucket centre. Bucket axis routing uses physical +X, not a nearest box face.
+Authored joint poses and heights are unchanged with IK disabled.
 
 For a simulated bucket experiment:
 
@@ -182,6 +191,8 @@ Start the GUI with the server whose tunnel you want it to manage:
 ros2 run lm vlm_planner_app --server tars
 # or
 ros2 run lm vlm_planner_app --server case
+# or
+ros2 run lm vlm_planner_app --server tailscale
 ```
 
 TARS is the default. Profiles are defined in `lm/vlm_connection.py`:
@@ -190,6 +201,20 @@ TARS is the default. Profiles are defined in `lm/vlm_connection.py`:
 | --- | --- | --- |
 | tars | sitchen@tars | 11434:localhost:11434 |
 | case | sitchen@case.inf.ethz.ch | 11434:localhost:8001 |
+| tailscale | sitongchen@100.99.254.46 | 11434:localhost:11434 |
+
+The Tailscale profile uses ordinary SSH over the Tailscale address; it does not
+connect directly to Ollama's remote HTTP port or enable Tailscale SSH. Configure
+Tailscale connectivity on both machines and SSH access separately. The app does
+not install Tailscale. The VLM service still uses `http://localhost:11434`.
+
+For the combined stack:
+
+```bash
+ros2 launch lm vlm_experiment_launch.py mode:=sim server:=tailscale
+```
+
+Use `mode:=real` for hardware. The model name/configuration is unchanged.
 
 The GUI does not launch the VLM service; run the ROS launch separately. SSH
 authentication must already work non-interactively for the GUI-managed tunnel.
@@ -199,6 +224,8 @@ For password authentication, start a tunnel yourself in another terminal:
 ssh -N -o ExitOnForwardFailure=yes -L 11434:localhost:11434 sitchen@tars
 # or
 ssh -N -o ExitOnForwardFailure=yes -L 11434:localhost:8001 sitchen@case.inf.ethz.ch
+# or
+ssh -N -o ExitOnForwardFailure=yes -L 11434:localhost:11434 sitongchen@100.99.254.46
 ```
 
 Then start the GUI with `ros2 run lm vlm_planner_app --no-tunnel`.

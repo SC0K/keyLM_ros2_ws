@@ -37,6 +37,17 @@ def test_dropdown_replaces_only_owned_tunnel_and_uses_case_profile():
     app._start_tunnel.assert_called_once()
 
 
+def test_dropdown_selects_tailscale_host_and_default_user():
+    from lm.vlm_connection import ssh_tunnel_command
+    app = app_stub()
+    app.server_selection.get.return_value = "tailscale"
+    app._select_server()
+    assert app.args.server == "tailscale"
+    assert (app.tunnel_host, app.tunnel_remote_port) == ("100.99.254.46", 11434)
+    assert ssh_tunnel_command(app.args.server, user=app.args.user)[-1] == "sitongchen@100.99.254.46"
+    app._start_tunnel.assert_called_once()
+
+
 @pytest.mark.parametrize("blocked_by", ["planner", "external_tunnel", "disabled"])
 def test_dropdown_does_not_interrupt_planner_or_external_tunnel(monkeypatch, blocked_by):
     app = app_stub()
