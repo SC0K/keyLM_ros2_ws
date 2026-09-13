@@ -43,6 +43,54 @@ planner/tunnel; an externally managed tunnel is not stopped. GUI **Stop** stops
 planning only, not the robot controller; use the robot's normal safety controls
 to stop motion. A display and working noninteractive SSH login are required.
 
+## Fixed-camera simulation video
+
+```bash
+ros2 launch lm vlm_video_launch.py server:=tailscale
+# Bucket version (same camera, grid, resolution and goal markers):
+ros2 launch lm vlm_video_launch.py server:=tailscale scene_object:=bucket
+```
+
+This simulation-only preset starts the robot at `[-2.0, 0.0, 0.8]`, retains
+the configured object's starting pose, and pre-fills a pickup / 1 m world-+X placement
+task. Connect the monitor and enter the usual goal-tracking mode, then press
+Start in the planner GUI. It does not start a task automatically.
+
+The monitor, VLM image and video use the named `experiment_video` fixed camera
+in `scene_crl_with_box_video.xml` or `scene_crl_with_bucket_video.xml`. It covers the approach, pickup and destination
+without following the robot. The scene has a white sky and white ground with a
+subtle grey grid and lighting/shadows; object geometry, mass and contact properties match
+the normal scene. The bucket version retains the original bucket STL, handle
+collision geometry and configured bucket-base pose, and routes `bucket_freejoint`
+to both the VLM camera and recorder. The GUI starts with a bucket task so the VLM
+can select the bucket library. The normal experiment launch remains unchanged by default.
+
+Recording starts when the recorder has received robot and box state. It writes
+1920x1080 MP4 at 30 fps under `~/Videos/vlm/` with a unique filename printed in
+the terminal. The video includes the green robot keyframe target points from
+the monitor feed, including pending supervised previews. It excludes monitor UI,
+coordinate axes and the target-object overlay. Set `video_show_robot_goal:=false`
+for footage without robot goal markers; `video_keyframe_target_topic` defaults to
+`/g1_sim/keyframe_target_poses`. The VLM input remains free of these goal markers.
+The VLM still receives images at its normal lower rate. Late recording frames
+repeat the last image to preserve wall-clock playback duration.
+
+Stop the launch with **Ctrl+C** to finalize the MP4; do not force-kill the
+recorder. Existing output files are rejected rather than overwritten.
+
+```bash
+ros2 launch lm vlm_video_launch.py server:=tailscale video_path:=/tmp/box_demo.mp4
+# Only the fixed white scene, without saving video:
+ros2 launch lm vlm_video_launch.py server:=tailscale record_video:=false
+```
+
+Adjust `video_width`, `video_height` (even sizes) and `video_fps` for recording
+quality. For 4K, pass `video_width:=3840 video_height:=2160` (requires more rendering
+capacity). Camera position, orientation and field of view are defined once in the
+scene's `experiment_video` camera. `initial_root_pos` can be overridden without
+editing the shared policy configuration. The placement target remains the
+starting object position plus 1 m along world +X, not robot-relative “front.”
+
 ## Box and bucket tasks
 
 The library in `lm/keyframes/` now contains six `*_box.npz` frames and six

@@ -1,0 +1,26 @@
+% Requires \usepackage{booktabs,graphicx}
+\begin{table}[t]
+\centering
+\caption{Tracking errors (mean $\pm$ std) at passed keyframe endpoints, including later-failed and reset-assisted trials. Starting distances: 0.5--2.3\,m; placement: 0.2--2.0\,m. Approach/pick/place counts: Uniform 9/9/5; ours 10/10/10. Pick/place denote crouching goals.}
+\label{tab:varied_distance_errors}
+\setlength{\tabcolsep}{3pt}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lccc}
+\toprule
+Method & Root (m) $\downarrow$ & Joint RMSE (rad) $\downarrow$ & Object (m) $\downarrow$ \\
+\midrule
+\multicolumn{4}{l}{\textbf{Approach}} \\
+Uniform & $0.125 \pm 0.043$ & $0.099 \pm 0.006$ & Masked \\
+Saliency-based (ours) & $\mathbf{0.114 \pm 0.048}$ & $\mathbf{0.076 \pm 0.005}$ & Masked \\
+\midrule
+\multicolumn{4}{l}{\textbf{Pick}} \\
+Uniform & $0.146 \pm 0.045$ & $0.142 \pm 0.018$ & $0.177 \pm 0.079$ \\
+Saliency-based (ours) & $\mathbf{0.128 \pm 0.022}$ & $\mathbf{0.114 \pm 0.002}$ & $\mathbf{0.041 \pm 0.000}$ \\
+\midrule
+\multicolumn{4}{l}{\textbf{Place}} \\
+Uniform & $0.194 \pm 0.038$ & $0.144 \pm 0.010$ & $\mathbf{0.094 \pm 0.007}$ \\
+Saliency-based (ours) & $\mathbf{0.073 \pm 0.018}$ & $\mathbf{0.122 \pm 0.002}$ & $0.230 \pm 0.021$ \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}

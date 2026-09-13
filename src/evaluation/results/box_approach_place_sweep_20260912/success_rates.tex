@@ -1,0 +1,17 @@
+% Requires \usepackage{booktabs,graphicx}
+\begin{table}[t]
+\centering
+\caption{Success rates over ten distance pairs per method. P\&P includes final standing and allows a reset after failed approach; end-to-end excludes resets.}
+\label{tab:varied_distance_success}
+\setlength{\tabcolsep}{3pt}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lccccc}
+\toprule
+Method & Approach & Pickup & Place goal & P\&P & End-to-end \\
+\midrule
+Uniform & $90\%$ & $50\%$ & $50\%$ & $40\%$ & $30\%$ \\
+Saliency-based (ours) & $100\%$ & $100\%$ & $100\%$ & $100\%$ & $100\%$ \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}

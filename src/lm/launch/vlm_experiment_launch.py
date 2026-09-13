@@ -39,6 +39,9 @@ def _robot_launch(context):
             "tracked_box_pose_topic": LaunchConfiguration("tracked_box_pose_topic"),
             "tracked_bucket_pose_topic": LaunchConfiguration("tracked_bucket_pose_topic"),
             "tracked_object_timeout_sec": LaunchConfiguration("tracked_object_timeout_sec"),
+            "sim_scene_xml": LaunchConfiguration("sim_scene_xml"),
+            "initial_root_pos": LaunchConfiguration("initial_root_pos"),
+            "monitor_camera_name": LaunchConfiguration("monitor_camera_name"),
         }.items(),
     )]
 
@@ -83,6 +86,9 @@ def generate_launch_description():
         DeclareLaunchArgument("manage_tunnel", default_value="true",
                               description="Let the GUI manage SSH. False for an existing external tunnel."),
         DeclareLaunchArgument("local_port", default_value=str(DEFAULT_LOCAL_PORT)),
+        DeclareLaunchArgument("sim_scene_xml", default_value="", description="Optional simulation scene override."),
+        DeclareLaunchArgument("initial_root_pos", default_value="", description="Optional simulation root XYZ override."),
+        DeclareLaunchArgument("monitor_camera_name", default_value="", description="Named fixed MuJoCo monitor camera."),
         DeclareLaunchArgument("ollama_host", default_value=["http://localhost:", LaunchConfiguration("local_port")]),
         DeclareLaunchArgument("camera_backend", default_value=_mode_default("mujoco", "usb")),
         DeclareLaunchArgument("monitor_topic", default_value=_mode_default("/g1_sim/monitor", "/g1_hardware/monitor")),

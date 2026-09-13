@@ -1,0 +1,433 @@
+{
+  "model_101000.onnx": {
+    "trials": 10,
+    "successes": 10,
+    "success_rate": 1,
+    "successful_trial_stage_errors": {
+      "approach": {
+        "root_position_m": {
+          "n": 10,
+          "mean": 0.09986485447734594,
+          "std": 0.03628484933621036
+        },
+        "root_xy_m": {
+          "n": 10,
+          "mean": 0.09746341397985817,
+          "std": 0.03946584658435053
+        },
+        "root_orientation_rad": {
+          "n": 10,
+          "mean": 0.060136106611916616,
+          "std": 0.008554282697454157
+        },
+        "joint_mae_rad": {
+          "n": 10,
+          "mean": 0.0603409007191658,
+          "std": 0.004151629415912757
+        },
+        "joint_rmse_rad": {
+          "n": 10,
+          "mean": 0.07771894112229347,
+          "std": 0.005027931597512646
+        },
+        "joint_max_rad": {
+          "n": 10,
+          "mean": 0.2126299500465393,
+          "std": 0.03736907428266666
+        },
+        "object_position_m": {
+          "n": 0,
+          "mean": null,
+          "std": null
+        },
+        "object_orientation_rad": {
+          "n": 0,
+          "mean": null,
+          "std": null
+        },
+        "mean_body_position_m": {
+          "n": 10,
+          "mean": 0.11054921969771385,
+          "std": 0.034033667881991005
+        }
+      },
+      "pick": {
+        "root_position_m": {
+          "n": 10,
+          "mean": 0.11194431036710739,
+          "std": 0.017151424177317416
+        },
+        "root_xy_m": {
+          "n": 10,
+          "mean": 0.11184459626674652,
+          "std": 0.017105782483265677
+        },
+        "root_orientation_rad": {
+          "n": 10,
+          "mean": 0.04832280034589592,
+          "std": 0.015201753983060123
+        },
+        "joint_mae_rad": {
+          "n": 10,
+          "mean": 0.08381518125534057,
+          "std": 0.0015480317037840283
+        },
+        "joint_rmse_rad": {
+          "n": 10,
+          "mean": 0.11608848124742507,
+          "std": 0.00284001232435762
+        },
+        "joint_max_rad": {
+          "n": 10,
+          "mean": 0.34832548201084135,
+          "std": 0.01726005124029066
+        },
+        "object_position_m": {
+          "n": 10,
+          "mean": 0.04074499345912766,
+          "std": 6.582692500118292e-7
+        },
+        "object_orientation_rad": {
+          "n": 10,
+          "mean": 0.000025594652226978487,
+          "std": 0.00003062660653482964
+        },
+        "mean_body_position_m": {
+          "n": 10,
+          "mean": 0.1122904896736145,
+          "std": 0.017820690434586055
+        }
+      },
+      "place": {
+        "root_position_m": {
+          "n": 10,
+          "mean": 0.0689976990222931,
+          "std": 0.010720987122872347
+        },
+        "root_xy_m": {
+          "n": 10,
+          "mean": 0.0681567419320345,
+          "std": 0.010647092631147234
+        },
+        "root_orientation_rad": {
+          "n": 10,
+          "mean": 0.051426694602271464,
+          "std": 0.0020033600005982745
+        },
+        "joint_mae_rad": {
+          "n": 10,
+          "mean": 0.08730198964476585,
+          "std": 0.0008831227062360967
+        },
+        "joint_rmse_rad": {
+          "n": 10,
+          "mean": 0.11869756579399109,
+          "std": 0.002320287507868354
+        },
+        "joint_max_rad": {
+          "n": 10,
+          "mean": 0.3582555890083313,
+          "std": 0.01343708138671742
+        },
+        "object_position_m": {
+          "n": 10,
+          "mean": 0.20726740038617222,
+          "std": 0.01519498452495263
+        },
+        "object_orientation_rad": {
+          "n": 10,
+          "mean": 0.11694349953847638,
+          "std": 0.033953159253048974
+        },
+        "mean_body_position_m": {
+          "n": 10,
+          "mean": 0.06956309005618096,
+          "std": 0.010136959886030592
+        }
+      }
+    },
+    "failures": []
+  },
+  "model_29000_uniform.onnx": {
+    "trials": 10,
+    "successes": 3,
+    "success_rate": 0.3,
+    "successful_trial_stage_errors": {
+      "approach": {
+        "root_position_m": {
+          "n": 3,
+          "mean": 0.09844398001829784,
+          "std": 0.050970474956396394
+        },
+        "root_xy_m": {
+          "n": 3,
+          "mean": 0.09556244686245918,
+          "std": 0.054423170665602184
+        },
+        "root_orientation_rad": {
+          "n": 3,
+          "mean": 0.05821657995336407,
+          "std": 0.026716456277269113
+        },
+        "joint_mae_rad": {
+          "n": 3,
+          "mean": 0.08132113516330719,
+          "std": 0.0027755003926026828
+        },
+        "joint_rmse_rad": {
+          "n": 3,
+          "mean": 0.10244884838660558,
+          "std": 0.0034260196961120332
+        },
+        "joint_max_rad": {
+          "n": 3,
+          "mean": 0.2654117743174235,
+          "std": 0.02642678547609645
+        },
+        "object_position_m": {
+          "n": 0,
+          "mean": null,
+          "std": null
+        },
+        "object_orientation_rad": {
+          "n": 0,
+          "mean": null,
+          "std": null
+        },
+        "mean_body_position_m": {
+          "n": 3,
+          "mean": 0.11391384154558182,
+          "std": 0.046804250978384754
+        }
+      },
+      "pick": {
+        "root_position_m": {
+          "n": 3,
+          "mean": 0.10573215534289677,
+          "std": 0.023715332298053136
+        },
+        "root_xy_m": {
+          "n": 3,
+          "mean": 0.10543554772933324,
+          "std": 0.023539230344724837
+        },
+        "root_orientation_rad": {
+          "n": 3,
+          "mean": 0.045966559947152597,
+          "std": 0.0051844261035302215
+        },
+        "joint_mae_rad": {
+          "n": 3,
+          "mean": 0.09980026632547379,
+          "std": 0.0038030249078032084
+        },
+        "joint_rmse_rad": {
+          "n": 3,
+          "mean": 0.13597949345906576,
+          "std": 0.0035857669666006947
+        },
+        "joint_max_rad": {
+          "n": 3,
+          "mean": 0.3521002729733785,
+          "std": 0.0003005454861749887
+        },
+        "object_position_m": {
+          "n": 3,
+          "mean": 0.041310131132298755,
+          "std": 0.0007942499627721756
+        },
+        "object_orientation_rad": {
+          "n": 3,
+          "mean": 0.0011400750774259586,
+          "std": 0.0008466411331059639
+        },
+        "mean_body_position_m": {
+          "n": 3,
+          "mean": 0.10203152149915695,
+          "std": 0.022394596154154452
+        }
+      },
+      "place": {
+        "root_position_m": {
+          "n": 3,
+          "mean": 0.1855065325895945,
+          "std": 0.010066552321046442
+        },
+        "root_xy_m": {
+          "n": 3,
+          "mean": 0.18496058384577432,
+          "std": 0.010143572227987424
+        },
+        "root_orientation_rad": {
+          "n": 3,
+          "mean": 0.055180084679765734,
+          "std": 0.008308760234270397
+        },
+        "joint_mae_rad": {
+          "n": 3,
+          "mean": 0.1013222907980283,
+          "std": 0.0012462992807414283
+        },
+        "joint_rmse_rad": {
+          "n": 3,
+          "mean": 0.13573231796423593,
+          "std": 0.0011559013062463724
+        },
+        "joint_max_rad": {
+          "n": 3,
+          "mean": 0.36331988374392193,
+          "std": 0.0029415815891597253
+        },
+        "object_position_m": {
+          "n": 3,
+          "mean": 0.1008965751646345,
+          "std": 0.00565317218334958
+        },
+        "object_orientation_rad": {
+          "n": 3,
+          "mean": 0.17270506616077577,
+          "std": 0.009437814437625652
+        },
+        "mean_body_position_m": {
+          "n": 3,
+          "mean": 0.17347107330958048,
+          "std": 0.010302000539006165
+        }
+      }
+    },
+    "failures": [
+      {
+        "trial": 2,
+        "reason": "stand_before_pick_box: fall"
+      },
+      {
+        "trial": 3,
+        "reason": "stand_before_pick_box: fall"
+      },
+      {
+        "trial": 4,
+        "reason": "stand_before_pick_box: fall"
+      },
+      {
+        "trial": 5,
+        "reason": "stand_before_pick_box: fall"
+      },
+      {
+        "trial": 6,
+        "reason": "stand_before_pick_box: fall"
+      },
+      {
+        "trial": 7,
+        "reason": "stand_after_pick_box: timeout"
+      },
+      {
+        "trial": 8,
+        "reason": "stand_after_pick_box: fall"
+      }
+    ]
+  },
+  "model_28000.onnx": {
+    "trials": 10,
+    "successes": 0,
+    "success_rate": 0,
+    "successful_trial_stage_errors": {
+      "approach": {},
+      "pick": {},
+      "place": {}
+    },
+    "failures": [
+      {
+        "trial": 1,
+        "reason": "approach_box: timeout"
+      },
+      {
+        "trial": 2,
+        "reason": "approach_box: timeout"
+      },
+      {
+        "trial": 3,
+        "reason": "approach_box: timeout"
+      },
+      {
+        "trial": 4,
+        "reason": "approach_box: timeout"
+      },
+      {
+        "trial": 5,
+        "reason": "approach_box: timeout"
+      },
+      {
+        "trial": 6,
+        "reason": "approach_box: timeout"
+      },
+      {
+        "trial": 7,
+        "reason": "approach_box: timeout"
+      },
+      {
+        "trial": 8,
+        "reason": "approach_box: timeout"
+      },
+      {
+        "trial": 9,
+        "reason": "approach_box: timeout"
+      },
+      {
+        "trial": 10,
+        "reason": "approach_box: timeout"
+      }
+    ]
+  },
+  "model_40000.onnx": {
+    "trials": 10,
+    "successes": 0,
+    "success_rate": 0,
+    "successful_trial_stage_errors": {
+      "approach": {},
+      "pick": {},
+      "place": {}
+    },
+    "failures": [
+      {
+        "trial": 1,
+        "reason": "approach_box: fall"
+      },
+      {
+        "trial": 2,
+        "reason": "approach_box: fall"
+      },
+      {
+        "trial": 3,
+        "reason": "approach_box: fall"
+      },
+      {
+        "trial": 4,
+        "reason": "approach_box: fall"
+      },
+      {
+        "trial": 5,
+        "reason": "approach_box: fall"
+      },
+      {
+        "trial": 6,
+        "reason": "approach_box: fall"
+      },
+      {
+        "trial": 7,
+        "reason": "approach_box: fall"
+      },
+      {
+        "trial": 8,
+        "reason": "approach_box: fall"
+      },
+      {
+        "trial": 9,
+        "reason": "approach_box: fall"
+      },
+      {
+        "trial": 10,
+        "reason": "approach_box: fall"
+      }
+    ]
+  }
+}

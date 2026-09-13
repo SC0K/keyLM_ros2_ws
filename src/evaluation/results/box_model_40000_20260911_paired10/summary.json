@@ -1,0 +1,54 @@
+{
+  "model_40000.onnx": {
+    "trials": 10,
+    "successes": 0,
+    "success_rate": 0.0,
+    "successful_trial_stage_errors": {
+      "approach": {},
+      "pick": {},
+      "place": {}
+    },
+    "failures": [
+      {
+        "trial": 1,
+        "reason": "approach_box: fall"
+      },
+      {
+        "trial": 2,
+        "reason": "approach_box: fall"
+      },
+      {
+        "trial": 3,
+        "reason": "approach_box: fall"
+      },
+      {
+        "trial": 4,
+        "reason": "approach_box: fall"
+      },
+      {
+        "trial": 5,
+        "reason": "approach_box: fall"
+      },
+      {
+        "trial": 6,
+        "reason": "approach_box: fall"
+      },
+      {
+        "trial": 7,
+        "reason": "approach_box: fall"
+      },
+      {
+        "trial": 8,
+        "reason": "approach_box: fall"
+      },
+      {
+        "trial": 9,
+        "reason": "approach_box: fall"
+      },
+      {
+        "trial": 10,
+        "reason": "approach_box: fall"
+      }
+    ]
+  }
+}

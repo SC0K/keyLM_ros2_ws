@@ -1,0 +1,470 @@
+{
+  "created": "2026-09-12T16:18:40.220546",
+  "initial_conditions": [
+    {
+      "trial": 1,
+      "root_pos": [
+        -0.14347068753065084,
+        -0.002986765012794424,
+        0.8
+      ],
+      "box_pos": [
+        0.35249909650678535,
+        0.012323629747508422,
+        0.15
+      ],
+      "root_quat": [
+        0.9999683760319455,
+        0.0,
+        0.0,
+        0.0079527942280466
+      ],
+      "box_quat": [
+        0.9999984137437306,
+        0.0,
+        0.0,
+        0.001781154126615068
+      ],
+      "walking_noise_seed": 20260911,
+      "place_offset_xy_m": [
+        0.0,
+        0.0
+      ],
+      "place_distance_m": 0.2,
+      "nominal_root_x_m": -0.15000000000000002,
+      "approach_distance_m": 0.5,
+      "actual_initial_xy_distance_m": 0.49620604073898317
+    },
+    {
+      "trial": 2,
+      "root_pos": [
+        -0.33973614329961466,
+        -0.007920053454419786,
+        0.8
+      ],
+      "box_pos": [
+        0.342173413771658,
+        -0.017532409279215556,
+        0.15
+      ],
+      "root_quat": [
+        0.9999374484918059,
+        0.0,
+        0.0,
+        0.011184771061452707
+      ],
+      "box_quat": [
+        0.9999930682213407,
+        0.0,
+        0.0,
+        0.0037233733722342576
+      ],
+      "walking_noise_seed": 20260912,
+      "place_offset_xy_m": [
+        0.0,
+        0.0
+      ],
+      "place_distance_m": 0.4,
+      "nominal_root_x_m": -0.35,
+      "approach_distance_m": 0.7,
+      "actual_initial_xy_distance_m": 0.6819773027085592
+    },
+    {
+      "trial": 3,
+      "root_pos": [
+        -0.5515404164208086,
+        -0.001206671184219174,
+        0.8
+      ],
+      "box_pos": [
+        0.3647764042539982,
+        -0.0057597612266145955,
+        0.15
+      ],
+      "root_quat": [
+        0.9999130509068163,
+        0.0,
+        0.0,
+        0.01318675950423964
+      ],
+      "box_quat": [
+        0.9999759832055878,
+        0.0,
+        0.0,
+        0.006930585257974888
+      ],
+      "walking_noise_seed": 20260913,
+      "place_offset_xy_m": [
+        0.0,
+        0.0
+      ],
+      "place_distance_m": 0.6,
+      "nominal_root_x_m": -0.5499999999999999,
+      "approach_distance_m": 0.8999999999999999,
+      "actual_initial_xy_distance_m": 0.9163281325379683
+    },
+    {
+      "trial": 4,
+      "root_pos": [
+        -0.7699186119241412,
+        -0.009021813933811412,
+        0.8
+      ],
+      "box_pos": [
+        0.3655950474248634,
+        0.01180446197911714,
+        0.15
+      ],
+      "root_quat": [
+        0.9999377829883348,
+        0.0,
+        0.0,
+        -0.011154826416119536
+      ],
+      "box_quat": [
+        0.9999779983644905,
+        0.0,
+        0.0,
+        -0.006633459651415034
+      ],
+      "walking_noise_seed": 20260914,
+      "place_offset_xy_m": [
+        0.0,
+        0.0
+      ],
+      "place_distance_m": 0.8,
+      "nominal_root_x_m": -0.7500000000000001,
+      "approach_distance_m": 1.1,
+      "actual_initial_xy_distance_m": 1.1357046290019994
+    },
+    {
+      "trial": 5,
+      "root_pos": [
+        -0.9327560977314107,
+        -0.006197101061177532,
+        0.8
+      ],
+      "box_pos": [
+        0.3399342697209986,
+        -0.0037298218745560573,
+        0.15
+      ],
+      "root_quat": [
+        0.9999824354830067,
+        0.0,
+        0.0,
+        -0.005926949086536062
+      ],
+      "box_quat": [
+        0.9999164792710151,
+        0.0,
+        0.0,
+        0.012924182073063041
+      ],
+      "walking_noise_seed": 20260915,
+      "place_offset_xy_m": [
+        0.0,
+        0.0
+      ],
+      "place_distance_m": 1.0,
+      "nominal_root_x_m": -0.9499999999999998,
+      "approach_distance_m": 1.2999999999999998,
+      "actual_initial_xy_distance_m": 1.2726927590242405
+    },
+    {
+      "trial": 6,
+      "root_pos": [
+        -1.143662070332297,
+        0.004652691379811991,
+        0.8
+      ],
+      "box_pos": [
+        0.35125196821560833,
+        0.01586207870246856,
+        0.15
+      ],
+      "root_quat": [
+        0.9999499412885311,
+        0.0,
+        0.0,
+        0.010005744203370665
+      ],
+      "box_quat": [
+        0.9999873732048354,
+        0.0,
+        0.0,
+        0.005025279185593112
+      ],
+      "walking_noise_seed": 20260916,
+      "place_offset_xy_m": [
+        0.0,
+        0.0
+      ],
+      "place_distance_m": 1.2,
+      "nominal_root_x_m": -1.15,
+      "approach_distance_m": 1.5,
+      "actual_initial_xy_distance_m": 1.4949560639068151
+    },
+    {
+      "trial": 7,
+      "root_pos": [
+        -1.3508895739491522,
+        -0.016456461532001986,
+        0.8
+      ],
+      "box_pos": [
+        0.3673780151719503,
+        -0.0036997428661682367,
+        0.15
+      ],
+      "root_quat": [
+        0.9998628559927913,
+        0.0,
+        0.0,
+        -0.016561075023638138
+      ],
+      "box_quat": [
+        0.9999975628573282,
+        0.0,
+        0.0,
+        0.0022077770276891628
+      ],
+      "walking_noise_seed": 20260917,
+      "place_offset_xy_m": [
+        0.0,
+        0.0
+      ],
+      "place_distance_m": 1.4,
+      "nominal_root_x_m": -1.35,
+      "approach_distance_m": 1.7000000000000002,
+      "actual_initial_xy_distance_m": 1.7183149425222273
+    },
+    {
+      "trial": 8,
+      "root_pos": [
+        -1.5390580053894463,
+        0.01930121946322084,
+        0.8
+      ],
+      "box_pos": [
+        0.3361738501041905,
+        0.00737927562685162,
+        0.15
+      ],
+      "root_quat": [
+        0.9999251863286348,
+        0.0,
+        0.0,
+        0.012231996797129276
+      ],
+      "box_quat": [
+        0.999955613937264,
+        0.0,
+        0.0,
+        0.009421791514866964
+      ],
+      "walking_noise_seed": 20260918,
+      "place_offset_xy_m": [
+        0.0,
+        0.0
+      ],
+      "place_distance_m": 1.6,
+      "nominal_root_x_m": -1.5499999999999998,
+      "approach_distance_m": 1.9,
+      "actual_initial_xy_distance_m": 1.875269752489744
+    },
+    {
+      "trial": 9,
+      "root_pos": [
+        -1.7554710374820375,
+        0.007311856999314838,
+        0.8
+      ],
+      "box_pos": [
+        0.3592676404553493,
+        -0.014529242371470725,
+        0.15
+      ],
+      "root_quat": [
+        0.9999146153977455,
+        0.0,
+        0.0,
+        0.013067590213145377
+      ],
+      "box_quat": [
+        0.9999115106263643,
+        0.0,
+        0.0,
+        0.013303041640997298
+      ],
+      "walking_noise_seed": 20260919,
+      "place_offset_xy_m": [
+        0.0,
+        0.0
+      ],
+      "place_distance_m": 1.8,
+      "nominal_root_x_m": -1.7499999999999996,
+      "approach_distance_m": 2.0999999999999996,
+      "actual_initial_xy_distance_m": 2.1148514627713433
+    },
+    {
+      "trial": 10,
+      "root_pos": [
+        -1.930812556931426,
+        -0.01535592503492182,
+        0.8
+      ],
+      "box_pos": [
+        0.3409555690527075,
+        0.0007254966618355334,
+        0.15
+      ],
+      "root_quat": [
+        0.9999651473588241,
+        0.0,
+        0.0,
+        0.008348896193223834
+      ],
+      "box_quat": [
+        0.999997534187261,
+        0.0,
+        0.0,
+        0.002220724971186425
+      ],
+      "walking_noise_seed": 20260920,
+      "place_offset_xy_m": [
+        0.0,
+        0.0
+      ],
+      "place_distance_m": 2.0,
+      "nominal_root_x_m": -1.9499999999999997,
+      "approach_distance_m": 2.3,
+      "actual_initial_xy_distance_m": 2.2718250439594265
+    }
+  ],
+  "seed": 20260911,
+  "phases": [
+    [
+      "approach",
+      "approach_box"
+    ],
+    [
+      "pick",
+      "stand_before_pick_box"
+    ],
+    [
+      "pick",
+      "crouch_to_pick_box"
+    ],
+    [
+      "pick",
+      "stand_after_pick_box"
+    ],
+    [
+      "place",
+      "stand_before_place_box"
+    ],
+    [
+      "place",
+      "crouch_to_place_box"
+    ],
+    [
+      "place",
+      "stand_after_place_box"
+    ]
+  ],
+  "mujoco_version": "3.3.5",
+  "onnxruntime_version": "1.23.2",
+  "physics_timestep": 0.001667,
+  "control_decimation": 10,
+  "goal_timeout_s": 30.0,
+  "warmup_seconds": 2.0,
+  "reset_perturbations": {
+    "xy_m": 0.02,
+    "yaw_deg": 2.0
+  },
+  "placement_noise_xy_m": 0.0,
+  "approach_range_m": [
+    0.5,
+    2.3
+  ],
+  "recovery": "On approach failure: reset robot nominal X to 0, restore initial box and all state/history; retry manipulation only once.",
+  "error_cohorts": "successful_keyframe_errors: each passed crouching pick/place or approach endpoint, irrespective of later failure; legacy full-manipulation statistics also retained.",
+  "policy_sha256": {
+    "/home/sitongchen/keyLM_ros2_ws/src/crl-humanoid-ros/crl_g1_goalcontroller_py/crl_g1_goalcontroller_python/model/model_101000.onnx": "0cd14cdbd77e71bfd0a2ba7728479bc31223bbeb1082cb0342ccb52868231d26",
+    "/home/sitongchen/keyLM_ros2_ws/src/crl-humanoid-ros/crl_g1_goalcontroller_py/crl_g1_goalcontroller_python/model/model_29000_uniform.onnx": "bffd53b5611e2b22c4544cd84d74d255dc15473b0a0e15ee6328a956e3b11c83"
+  },
+  "source_sha256": {
+    "/home/sitongchen/keyLM_ros2_ws/src/lm/lm/evaluate_box_distances.py": "d86c3e2a14b46dca505f5dd8d1e59662aa98619463b93e00405fe40a2eeb8cb7",
+    "/home/sitongchen/keyLM_ros2_ws/src/lm/lm/evaluate_box_policies.py": "39c7429e12c2364bde6e8f33c36537158b4c47ba2c0c07f78f9ed966680831f8",
+    "/home/sitongchen/keyLM_ros2_ws/src/crl-humanoid-ros/crl_g1_goalcontroller_py/crl_g1_goalcontroller_python/crl_g1_goalcontroller_python/g1_keyframe_controller.py": "333c66479202e1440f0d45f11a41b76d3ffce79423ddb77e8921a948bb80bb50",
+    "/home/sitongchen/keyLM_ros2_ws/src/crl-humanoid-ros/crl_g1_goalcontroller_py/crl_g1_goalcontroller_python/config/g1_keyframe_tracking_obj.yaml": "31983301317b69651a3864f123eaf678a4471566c79eb42c56cc722463f53d87",
+    "/home/sitongchen/keyLM_ros2_ws/src/crl-humanoid-ros/crl_humanoid_commons/data/robots/g1_description/scene_crl_with_box.xml": "a751a878668ba616a2f7ecd0f4f0098cded3e0b25dfd852299336cb4f833894a",
+    "/home/sitongchen/keyLM_ros2_ws/src/crl-humanoid-ros/crl_humanoid_commons/data/robots/g1_description/g1_29dof_crl.xml": "ca8a16cd50472d78d1c38078a95f344dc045aaabafd7b1b0c81fc522eab0b49f",
+    "/home/sitongchen/keyLM_ros2_ws/src/crl-humanoid-ros/crl_humanoid_commons/include/crl_humanoid_commons/RobotParameters.h": "de7ba9cabe0edecaf6676025c725025632022a46ede75fdf9adbc14e14b2f370",
+    "/home/sitongchen/keyLM_ros2_ws/src/lm/lm/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "/home/sitongchen/keyLM_ros2_ws/src/lm/lm/box_config.py": "1e638e7746b7a6bc7b6972d1428be19a6292615c00b2de8450c6467477f061fb",
+    "/home/sitongchen/keyLM_ros2_ws/src/lm/lm/box_orientation.py": "d611da4769fffa4691b39a73f5e24326b8abafc9b90f841a0a7598307e3973d4",
+    "/home/sitongchen/keyLM_ros2_ws/src/lm/lm/dummy_camera.py": "f06e5fe829add09467da3ceee586aa4155e97f0bcc834c16cdce730fe4467999",
+    "/home/sitongchen/keyLM_ros2_ws/src/lm/lm/generated_stand.py": "9e3bba23581a672a84e95bb394a83d72e9f0731822846165760c42bafce88a3e",
+    "/home/sitongchen/keyLM_ros2_ws/src/lm/lm/keyframe_box_retarget.py": "e521026b715ddc6d86a95b81441ec55d2075939f5bb8db25300ca847633964e1",
+    "/home/sitongchen/keyLM_ros2_ws/src/lm/lm/keyframe_modes.py": "69e6028dc215d16ae18b444876896c03ed1543a63d7d1e49b80176a40ea4d4fa",
+    "/home/sitongchen/keyLM_ros2_ws/src/lm/lm/keyframe_retargeter_node copy.py": "8d1f70e7c47ec41256692595706d938f7ecc4af1b1b923c178c65769816aa4c6",
+    "/home/sitongchen/keyLM_ros2_ws/src/lm/lm/keyframe_retargeter_node.py": "969412858c0724394ca5c46f2e6bed8a12b12a1c904c32c05bfe055d890bd006",
+    "/home/sitongchen/keyLM_ros2_ws/src/lm/lm/mujoco_visualizer.py": "cbf070e8ef61c0fa95b0839339a39bfa3089ba1e5551a707a2d6b3fe82603d6d",
+    "/home/sitongchen/keyLM_ros2_ws/src/lm/lm/replay_policy_trial.py": "6ad0141f4025226e3aba9a198255400558b6ad9ad9e06a8d89e4946e9be018c3",
+    "/home/sitongchen/keyLM_ros2_ws/src/lm/lm/scene_camera.py": "be43b989c4d7ba9760525f232df62612eaaaf760e245d59e6bd4f33b9f06a268",
+    "/home/sitongchen/keyLM_ros2_ws/src/lm/lm/supervised_goal.py": "99606597522231eca4999fab8072f78341bca5cd4c0efb9f32e42a37b079ee18",
+    "/home/sitongchen/keyLM_ros2_ws/src/lm/lm/tracked_objects.py": "9828bad2afb4a2c6dc00ac9a4bb53ef3983901d61bd560dc4aafd58932fb90ea",
+    "/home/sitongchen/keyLM_ros2_ws/src/lm/lm/video_recording.py": "56d82acf96eca07c02406dde43e32cd89f1128ec44ab24ccae72f2e84b8e8534",
+    "/home/sitongchen/keyLM_ros2_ws/src/lm/lm/vlm_connection.py": "d174cd4951926ef1bb6527bf9f0e089bc760e12d1aa5dbdca73153dc00edf2a7",
+    "/home/sitongchen/keyLM_ros2_ws/src/lm/lm/vlm_planner_app.py": "3933f6330a781791ade8b1128003933b218d3c61cb03966c3a1eb2085f727343",
+    "/home/sitongchen/keyLM_ros2_ws/src/lm/lm/vlm_service.py": "aa6987bfdcf62780677fdd7c71ad19cb576f7b0384ac8bed6922cc321a553414",
+    "/home/sitongchen/keyLM_ros2_ws/src/lm/lm/vml.py": "a3cb745ecacd84e157c77ba3e62d0fbe64e189bb7702608499d0d0f2fa489a42",
+    "/home/sitongchen/keyLM_ros2_ws/src/lm/keyframes/crouch_to_pick_box.npz": "2d449e76bded73c8b893ef3aa54115e67c8e30fd14a9dfa576a6cea7cbbf906f",
+    "/home/sitongchen/keyLM_ros2_ws/src/lm/keyframes/crouch_to_place_box.npz": "2d449e76bded73c8b893ef3aa54115e67c8e30fd14a9dfa576a6cea7cbbf906f",
+    "/home/sitongchen/keyLM_ros2_ws/src/lm/keyframes/stand_after_pick_box.npz": "c316cdc2f8ffddd4492faa56c7546e528fe5a1da3a11989ca89a6abbd2f6e821",
+    "/home/sitongchen/keyLM_ros2_ws/src/lm/keyframes/stand_after_place_box.npz": "3c310a4329e905bfe3bd9b0da8f0b6768acaf2444a683bfc81c703ab2fb75df1",
+    "/home/sitongchen/keyLM_ros2_ws/src/lm/keyframes/stand_before_pick_box.npz": "3c310a4329e905bfe3bd9b0da8f0b6768acaf2444a683bfc81c703ab2fb75df1",
+    "/home/sitongchen/keyLM_ros2_ws/src/lm/keyframes/stand_before_place_box.npz": "c316cdc2f8ffddd4492faa56c7546e528fe5a1da3a11989ca89a6abbd2f6e821"
+  },
+  "completed_trials": 20,
+  "vlm_thresholds": {
+    "stationary_hold_sec": 0.5,
+    "min_action_duration_sec": 1.0,
+    "robot_linear_stationary_threshold_mps": 0.1,
+    "robot_angular_stationary_threshold_radps": 0.15,
+    "object_linear_stationary_threshold_mps": 0.15,
+    "object_angular_stationary_threshold_radps": 0.3,
+    "mean_body_success_threshold_m": 0.3,
+    "root_position_success_threshold_m": 0.3,
+    "root_orientation_success_threshold_rad": 0.8,
+    "object_position_success_threshold_m": 0.45,
+    "task_object_position_threshold_m": 0.6,
+    "pick_max_horizontal_distance_m": 0.45
+  },
+  "effective_retargeting": {
+    "ik_enabled": false,
+    "source_geometry": {
+      "size_xyz": [
+        0.3,
+        0.3,
+        0.3
+      ],
+      "forward_axis": "y",
+      "up_axis": "-z"
+    },
+    "target_geometry": {
+      "size_xyz": [
+        0.35,
+        0.35,
+        0.35
+      ],
+      "forward_axis": "x",
+      "up_axis": "z"
+    },
+    "standing_waist_pitch_deg": 5.0,
+    "target_box_orientation_offset_rpy_deg": "0 0 0"
+  },
+  "wall_time_seconds": 66.73436684301123
+}

@@ -9,7 +9,7 @@ import numpy as np
 import rclpy
 from ament_index_python.packages import get_package_share_directory
 from crl_humanoid_msgs.msg import Monitor
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseArray, PoseStamped
 from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.node import Node
 from sensor_msgs.msg import Image
@@ -78,6 +78,14 @@ class SceneCameraNode(Node):
         self.declare_parameter("camera_distance", 2.4)
         self.declare_parameter("camera_azimuth", -135.0)
         self.declare_parameter("camera_elevation", -18.0)
+        self.declare_parameter("recording_path", "")
+        self.declare_parameter("publish_images", True)
+        self.declare_parameter("hide_sites", False)
+        self.declare_parameter("show_robot_goal", False)
+        self.declare_parameter("keyframe_target_topic", "/g1_sim/keyframe_target_poses")
+        self._recording = None
+        self._have_monitor = self._have_object_pose = False
+        self._publish_images = bool(self.get_parameter("publish_images").value)
 
         self._backend = str(self.get_parameter("backend").value).strip().lower()
         self._topic = str(self.get_parameter("topic").value)
@@ -185,6 +193,9 @@ class SceneCameraNode(Node):
             self._usb_thread.join(timeout=2.0)
         if hasattr(self, "_renderer"):
             self._renderer.close()
+        if self._recording is not None:
+            self._recording.close()
+            self.get_logger().info(f"Saved recording: {self._recording.path} ({self._recording.frames} frames)")
         return super().destroy_node()
 
     def _init_passthrough_backend(self) -> None:
@@ -208,11 +219,21 @@ class SceneCameraNode(Node):
         self._xml_path = self._resolve_robot_xml(str(self.get_parameter("robot_xml").value).strip())
         self._model = mujoco.MjModel.from_xml_path(str(self._xml_path))
         self._data = mujoco.MjData(self._model)
+        self._model.vis.global_.offwidth = max(self._width, self._model.vis.global_.offwidth)
+        self._model.vis.global_.offheight = max(self._height, self._model.vis.global_.offheight)
         self._renderer = mujoco.Renderer(self._model, height=self._height, width=self._width)
+        self._scene_option = mujoco.MjvOption()
+        if self.get_parameter("hide_sites").value:
+            self._scene_option.sitegroup[:] = 0
         self._camera_name = str(self.get_parameter("camera_name").value).strip()
         self._camera = self._make_free_camera()
         self._published_first_image = False
         self._last_render_error_log_time = 0.0
+        recording_path = str(self.get_parameter("recording_path").value).strip()
+        if recording_path:
+            from lm.video_recording import VideoRecording
+            self._recording = VideoRecording(recording_path, self._rate_hz, self._width, self._height)
+            self.get_logger().info(f"Recording MP4 to {self._recording.path}; waiting for robot/object state")
 
         self._object_joint_qpos_adr = self._joint_qpos_adr(
             str(self.get_parameter("object_joint_name").value)
@@ -230,6 +251,15 @@ class SceneCameraNode(Node):
             self._on_object_pose,
             10,
         )
+        if self.get_parameter("show_robot_goal").value:
+            self._goal_mocap_ids = []
+            for index in range(14):
+                body_id = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_BODY, f"target_kp_{index:02d}")
+                self._goal_mocap_ids.append(int(self._model.body_mocapid[body_id]) if body_id >= 0 else -1)
+            self.create_subscription(
+                PoseArray, str(self.get_parameter("keyframe_target_topic").value),
+                self._on_robot_goal, 10,
+            )
         self._timer = self.create_timer(1.0 / self._rate_hz, self._publish_mujoco_image)
         self.get_logger().info(
             f"Scene camera rendering {self._xml_path} to {self._topic} at {self._rate_hz:.2f} Hz"
@@ -328,6 +358,7 @@ class SceneCameraNode(Node):
 
         with self._lock:
             self._data.qpos[0:3] = root_pos
+            self._have_monitor = True
             self._data.qpos[3:7] = root_quat
             for name, pos in zip(msg.sensor.joint.name, msg.sensor.joint.position):
                 joint_id = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_JOINT, str(name))
@@ -346,12 +377,15 @@ class SceneCameraNode(Node):
             if adr + 6 < self._model.nq:
                 self._data.qpos[adr : adr + 3] = pos
                 self._data.qpos[adr + 3 : adr + 7] = quat
+                self._have_object_pose = True
 
     def _publish_mujoco_image(self) -> None:
+        if self._recording is not None and not (self._have_monitor and self._have_object_pose):
+            return
         try:
             with self._lock:
                 mujoco.mj_forward(self._model, self._data)
-                self._renderer.update_scene(self._data, camera=self._camera)
+                self._renderer.update_scene(self._data, camera=self._camera, scene_option=self._scene_option)
                 bgr = np.ascontiguousarray(self._renderer.render()[:, :, ::-1])
         except Exception as exc:
             now = time.monotonic()
@@ -360,6 +394,10 @@ class SceneCameraNode(Node):
                 self._last_render_error_log_time = now
             return
 
+        if self._recording is not None:
+            self._recording.write(bgr)
+        if not self._publish_images:
+            return
         msg = Image()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = self._frame_id
@@ -375,6 +413,23 @@ class SceneCameraNode(Node):
             self.get_logger().info(
                 f"Scene camera published first image on {self._topic} ({self._width}x{self._height})"
             )
+
+    def _on_robot_goal(self, msg: PoseArray) -> None:
+        # Mirror the monitor's controller-produced world-space target points.
+        # This also mirrors supervised previews, without activating a goal or
+        # touching measured robot/object qpos. The last (object) pose is omitted.
+        with self._lock:
+            for index, mocap_id in enumerate(self._goal_mocap_ids):
+                if mocap_id < 0:
+                    continue
+                position = np.array([0., 0., -10.])
+                if index < len(msg.poses):
+                    p = msg.poses[index].position
+                    candidate = np.array([p.x, p.y, p.z])
+                    if np.all(np.isfinite(candidate)):
+                        position = candidate
+                self._data.mocap_pos[mocap_id] = position
+                self._data.mocap_quat[mocap_id] = [1., 0., 0., 0.]
 
 
 def main(args: list[str] | None = None) -> None:
