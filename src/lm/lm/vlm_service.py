@@ -51,6 +51,9 @@ OBJECT AND LIBRARY SELECTION
 Use the task text to identify the requested object and the image to confirm
 whether it is a box or bucket. Boxes use two-hand grasps; buckets use the right
 hand at the handle. Never require a two-hand grasp for a bucket.
+For approach_bucket, the standing goal is offset to the bucket's left so the
+handle stays on the robot's right, matching stand_before_pick_bucket. The robot
+faces the same direction as the bucket; do not turn it to face the bucket.
 All phase names below are shorthand: append _box or _bucket to EVERY selected
 keyframe, including approach and standing poses. For example, a bucket placement
 uses stand_before_place_bucket -> crouch_to_place_bucket -> stand_after_place_bucket.

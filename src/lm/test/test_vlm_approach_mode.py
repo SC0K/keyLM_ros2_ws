@@ -59,16 +59,21 @@ def test_approach_reuses_stand_library_and_is_an_allowed_vlm_action():
 
 
 @pytest.mark.parametrize("xy", [[2., 1.], [-2., 1.], [0., 0.]])
-def test_approach_root_stops_030m_from_current_box_xy(xy):
+@pytest.mark.parametrize("yaw", [0., .7, -1.4])
+@pytest.mark.parametrize("axis,local_forward", [("x", [1., 0., 0.]), ("-x", [-1., 0., 0.]),
+                                               ("y", [0., 1., 0.]), ("-y", [0., -1., 0.])])
+def test_approach_root_stops_030m_along_observed_object_axis(xy, yaw, axis, local_forward):
     node = planner_at_distance(2.)
     node._current_box_center = np.array([*xy, .15])
     node._current_robot_quat_wxyz = np.array([1., 0., 0., 0.])
+    node._current_box_quat_wxyz = np.array([np.cos(yaw / 2), 0., 0., np.sin(yaw / 2)])
+    node.box_forward_axis = axis
     center, quat = node._approach_root_pose()
     assert APPROACH_XY_OFFSET_M == .30
     np.testing.assert_allclose(np.linalg.norm(center[:2] - xy), .30)
-    np.testing.assert_allclose(np.asarray(xy) - center[:2], .30 * _quat_wxyz_to_rotmat(quat)[:2, 0])
-    if np.linalg.norm(xy) > 0:
-        np.testing.assert_allclose(center[:2], np.asarray(xy) - .30 * np.asarray(xy) / np.linalg.norm(xy))
+    np.testing.assert_allclose(np.asarray(xy) - center[:2], .30 * _quat_wxyz_to_rotmat(quat)[:2, 0], atol=1e-8)
+    forward = (_quat_wxyz_to_rotmat(node._current_box_quat_wxyz) @ local_forward)[:2]
+    np.testing.assert_allclose(center[:2], np.asarray(xy) - .30 * forward, atol=1e-8)
     assert center[2] == node._current_box_center[2]
     assert np.all(np.isfinite(quat))
     np.testing.assert_allclose(np.linalg.norm(quat), 1.)

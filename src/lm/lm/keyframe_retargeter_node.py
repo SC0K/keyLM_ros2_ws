@@ -428,10 +428,13 @@ class KeyframeRetargeterNode(Node):
             self._object_to_manipulate = False
         payload = self._load_payload(keyframe_name)
         if phase == "approach":
-            # Use the planner's approach root (offset from current box XY),
-            # keeping authored height/joints. The controller then replaces the
-            # posture through its existing locomotion-goal path.
-            self._apply_root_pose(payload, self._target_root_center, self._target_root_quat_wxyz)
+            if self._retarget_object_type == "bucket":
+                # Approach the same left-offset stance used by bucket pickup,
+                # with the handle on the robot's right, in the observed frame.
+                self._retarget_planar("stand_before_pick", payload)
+            else:
+                self._apply_root_pose(payload, self._target_root_center, self._target_root_quat_wxyz)
+            # Keep authored height/joints; the controller supplies locomotion.
             self._zero_object_targets(payload)
             mode = "approach_locomotion_at_offset_root"
         elif phase in ("stand_before_pick", "stand_after_place"):
@@ -609,10 +612,11 @@ class KeyframeRetargeterNode(Node):
                     )
                 )
 
-            # Pre-pick goals use the latest observation in this request. Keep
-            # the lift anchored so its height offset is not applied twice.
+            # Follow current XY even during lift. Keep its starting Z and
+            # orientation anchored so retries do not accumulate lift height.
             if keyframe_phase(keyframe_name) == "stand_after_pick":
-                self._current_box_center = self._fixed_start_box_center.copy()
+                self._current_box_center = request_current_box_center.copy()
+                self._current_box_center[2] = self._fixed_start_box_center[2]
                 self._current_box_quat_wxyz = (
                     self._fixed_start_box_quat_wxyz.copy()
                 )

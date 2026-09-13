@@ -71,7 +71,8 @@ def test_switching_library_resets_old_object_latches_and_hand_selection(retarget
 
 @pytest.mark.parametrize("ik_enabled", [False, True])
 @pytest.mark.parametrize("yaw", [0., .7, -1.4, np.pi])
-def test_bucket_pickup_stand_keeps_library_lateral_offset_and_heading(retargeter, yaw, ik_enabled):
+@pytest.mark.parametrize("phase", ["approach", "stand_before_pick"])
+def test_bucket_pickup_stand_keeps_library_lateral_offset_and_heading(retargeter, yaw, ik_enabled, phase):
     retargeter._retarget_ik_enabled = ik_enabled
     retargeter._current_box_center = np.array([1.6, -.8, .05])
     retargeter._current_box_quat_wxyz = _yaw_to_quat_wxyz(yaw)
@@ -88,18 +89,35 @@ def test_bucket_pickup_stand_keeps_library_lateral_offset_and_heading(retargeter
     source_offset = source_heading[:2, :2].T @ (source["object_position_xyz"] - source_root)[:2]
     source_box_rotation = _quat_wxyz_to_rotmat(source["object_quat_wxyz"])
     source_box_yaw = np.arctan2(source_box_rotation[1, 0], source_box_rotation[0, 0])
-    blob, info = retargeter._process_keyframe("stand_before_pick_bucket", True)
+    blob, info = retargeter._process_keyframe(f"{phase}_bucket", True)
     with np.load(BytesIO(blob), allow_pickle=True) as result:
         root = result["body_positions"][pelvis]
         root_rotation = _quat_wxyz_to_rotmat(result["body_rotations"][pelvis])
-        offset = root_rotation[:2, :2].T @ (result["object_position_xyz"] - root)[:2]
+        root_yaw = np.arctan2(root_rotation[1, 0], root_rotation[0, 0])
+        root_heading = _quat_wxyz_to_rotmat(_yaw_to_quat_wxyz(root_yaw))
+        offset = root_heading[:2, :2].T @ (retargeter._current_box_center - root)[:2]
         np.testing.assert_allclose(offset, source_offset, atol=1e-6)
         np.testing.assert_allclose(offset, [.40746197, -.16375582], atol=1e-6)
         expected_rotation = _quat_wxyz_to_rotmat(_yaw_to_quat_wxyz(yaw - source_box_yaw))
         np.testing.assert_allclose(root[:2], retargeter._current_box_center[:2]
                                    + expected_rotation[:2, :2] @ (source_root - source["object_position_xyz"])[:2], atol=1e-6)
-        np.testing.assert_allclose(result["object_position_xyz"][:2], retargeter._current_box_center[:2])
         assert root[2] == source_root[2]
+        if phase == "approach":
+            np.testing.assert_array_equal(result["object_position_xyz"], np.zeros(3))
+            np.testing.assert_array_equal(result["object_quat_wxyz"], np.zeros(4))
+            np.testing.assert_array_equal(result["dof_positions"], source["dof_positions"])
+            assert not bool(result["object_to_manipulate"][0])
+            assert json.loads(info)["mode"] == "approach_locomotion_at_offset_root"
+            stand_blob, _ = retargeter._process_keyframe("stand_before_pick_bucket", True)
+            with np.load(BytesIO(stand_blob), allow_pickle=True) as stand:
+                np.testing.assert_allclose(root, stand["body_positions"][pelvis], atol=1e-6)
+                stand_rotation = _quat_wxyz_to_rotmat(stand["body_rotations"][pelvis])
+                stand_yaw = np.arctan2(stand_rotation[1, 0], stand_rotation[0, 0])
+                np.testing.assert_allclose(root_heading,
+                    _quat_wxyz_to_rotmat(_yaw_to_quat_wxyz(stand_yaw)), atol=1e-6)
+            retargeter._apply_box_ik.assert_not_called()
+            return
+        np.testing.assert_allclose(result["object_position_xyz"][:2], retargeter._current_box_center[:2])
         assert result["object_position_xyz"][2] == source["object_position_xyz"][2]
         expected_angles = dict(zip(POLICY_JOINT_NAMES, retargeter._standing_default_angles + retargeter._standing_joint_delta))
         np.testing.assert_allclose(result["dof_positions"], [expected_angles[n] for n in result["dof_names"]])

@@ -82,7 +82,8 @@ def test_vlm_latches_the_nominal_physical_target_once() -> None:
 
 
 @pytest.mark.parametrize("preinitialized_sim_target", [False, True])
-def test_bucket_task_keeps_observed_heading_instead_of_default_or_nearest_face(preinitialized_sim_target):
+@pytest.mark.parametrize("start_yaw", [0., 73., -160.])
+def test_bucket_task_offsets_position_and_turns_left_from_start(preinitialized_sim_target, start_yaw):
     from unittest.mock import Mock
     from lm.vml import VLMClientNode
 
@@ -92,9 +93,9 @@ def test_bucket_task_keeps_observed_heading_instead_of_default_or_nearest_face(p
     node._task_target_box_quat_wxyz = np.array([1., 0., 0., 0.]) if preinitialized_sim_target else None
     node._has_actual_box_pose = node._has_robot_root_pose = True
     start = np.array([1., 1., .02])
-    observed = quat_wxyz_from_rpy_deg(np.array([0., 0., 73.]))
+    observed = quat_wxyz_from_rpy_deg(np.array([0., 0., start_yaw]))
     node._fixed_start_box_pose = lambda: (start.copy(), observed.copy())
-    node._default_task_target_box_center = lambda: np.array([2., 1., .02])
+    node._starting_box_center = start.copy()
     node._default_target_box_quat_wxyz = np.array([1., 0., 0., 0.])
     node._box_forward_axis_initialized_from_robot = True
     node.box_forward_axis = "-y"
@@ -103,14 +104,18 @@ def test_bucket_task_keeps_observed_heading_instead_of_default_or_nearest_face(p
     node.publish_status = Mock()
 
     assert node.initialize_task_target_once("bucket")
-    np.testing.assert_allclose(node._task_target_box_quat_wxyz, observed)
-    np.testing.assert_allclose(node._task_target_box_center, [2., 1., .02])
+    expected = quat_wxyz_from_rpy_deg(np.array([0., 0., start_yaw + 45.]))
+    np.testing.assert_allclose(_rotmat_from_quat_wxyz(node._task_target_box_quat_wxyz),
+                               _rotmat_from_quat_wxyz(expected), atol=1e-12)
+    np.testing.assert_allclose(node._task_target_box_center, [2., 2., .02])
     assert node.box_forward_axis == "x"
     # Later observations must not make a fixed placement target drift.
     latched = node._task_target_box_quat_wxyz.copy()
     observed[:] = [1., 0., 0., 0.]
+    start[:] = [5., -3., .02]
     assert node.initialize_task_target_once("bucket")
     np.testing.assert_array_equal(node._task_target_box_quat_wxyz, latched)
+    np.testing.assert_allclose(node._task_target_box_center, [2., 2., .02])
 
 
 @pytest.mark.parametrize("source_height", [0.73, 0.9336])

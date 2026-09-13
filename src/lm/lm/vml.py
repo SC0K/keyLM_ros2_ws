@@ -24,6 +24,7 @@ from lm.box_config import (
     parse_box_size_xyz,
 )
 from lm.keyframe_modes import MANIPULATION_KEYFRAMES, keyframe_phase, keyframe_object_type
+from lm.keyframe_box_retarget import _quat_wxyz_multiply
 from lm_interfaces.srv import RetargetKeyframe, VLMQuery
 from lm.tracked_objects import TRACKED_OBJECT_DEFAULTS, TrackedObjects, validate_object_topics
 
@@ -38,8 +39,9 @@ _AXIS_TO_LOCAL_VEC = {
 }
 
 _GLOBAL_X_WORLD = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+BUCKET_PLACE_OFFSET_WORLD_M = np.array([1.3, 1.3, 0.0], dtype=np.float64)
+BUCKET_PLACE_YAW_OFFSET_DEG = 90.0
 APPROACH_XY_OFFSET_M = 0.30
-_FIXED_START_POSE_KEYFRAMES = frozenset({"stand_after_pick"})
 
 
 def published_goal_targets(data) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -202,6 +204,8 @@ class VLMClientNode(Node):
         self.declare_parameter("robot_angular_stationary_threshold_radps", 0.15)
         self.declare_parameter("object_linear_stationary_threshold_mps", 0.15)
         self.declare_parameter("object_angular_stationary_threshold_radps", 0.30)
+        self.declare_parameter("bucket_linear_stationary_threshold_mps", 0.30)
+        self.declare_parameter("bucket_angular_stationary_threshold_radps", 0.60)
         self.declare_parameter("mean_body_success_threshold_m", 0.30)
         self.declare_parameter("root_position_success_threshold_m", 0.3)
         self.declare_parameter("root_orientation_success_threshold_rad", 0.8)
@@ -259,6 +263,8 @@ class VLMClientNode(Node):
         self._robot_angular_stationary_threshold_radps = float(self.get_parameter("robot_angular_stationary_threshold_radps").value)
         self._object_linear_stationary_threshold_mps = float(self.get_parameter("object_linear_stationary_threshold_mps").value)
         self._object_angular_stationary_threshold_radps = float(self.get_parameter("object_angular_stationary_threshold_radps").value)
+        self._bucket_linear_stationary_threshold_mps = float(self.get_parameter("bucket_linear_stationary_threshold_mps").value)
+        self._bucket_angular_stationary_threshold_radps = float(self.get_parameter("bucket_angular_stationary_threshold_radps").value)
         self._mean_body_success_threshold_m = float(self.get_parameter("mean_body_success_threshold_m").value)
         self._root_position_success_threshold_m = float(self.get_parameter("root_position_success_threshold_m").value)
         self._root_orientation_success_threshold_rad = float(self.get_parameter("root_orientation_success_threshold_rad").value)
@@ -671,16 +677,11 @@ class VLMClientNode(Node):
         return root_center, root_quat
 
     def _approach_root_pose(self) -> tuple[np.ndarray, np.ndarray]:
-        """Stop 0.30 m from the current object centre, on the robot-facing side."""
+        """Stop 0.30 m from the object along its selected pickup forward axis."""
         center = self._current_box_center.copy()
-        direction = center[:2] - self._current_robot_center[:2]
-        quat = self._current_robot_quat_wxyz.copy()
-        if np.linalg.norm(direction) > 1e-9:
-            quat = _yaw_to_quat_wxyz(float(math.atan2(direction[1], direction[0])))
-        else:
-            # Coincident XY: use current heading to choose a stable approach side.
-            forward = _quat_wxyz_to_rotmat(quat)[:2, 0]
-            quat = _yaw_to_quat_wxyz(float(math.atan2(forward[1], forward[0])))
+        direction = (_quat_wxyz_to_rotmat(self._current_box_quat_wxyz)
+                     @ _AXIS_TO_LOCAL_VEC[self.box_forward_axis])[:2]
+        quat = _yaw_to_quat_wxyz(float(math.atan2(direction[1], direction[0])))
         center[:2] -= APPROACH_XY_OFFSET_M * _quat_wxyz_to_rotmat(quat)[:2, 0]
         # The retargeter supplies root Z from stand_before_pick.npz.
         return center, quat
@@ -725,6 +726,12 @@ class VLMClientNode(Node):
         return True
 
     def _stationary_flags(self) -> tuple[bool, bool, bool]:
+        # The suspended bucket can keep swinging after the robot has stopped.
+        bucket = getattr(self, "_selected_object_type", None) == "bucket"
+        linear_limit = (self._bucket_linear_stationary_threshold_mps if bucket
+                        else self._object_linear_stationary_threshold_mps)
+        angular_limit = (self._bucket_angular_stationary_threshold_radps if bucket
+                         else self._object_angular_stationary_threshold_radps)
         robot_stationary = (
             self._has_monitor
             and self._robot_linear_speed <= self._robot_linear_stationary_threshold_mps
@@ -734,8 +741,8 @@ class VLMClientNode(Node):
             self._has_actual_box_pose
             and (not getattr(self, "mocap_object_selection", False)
                  or self._tracked_objects.get(self._selected_object_type) is not None)
-            and self._object_linear_speed <= self._object_linear_stationary_threshold_mps
-            and self._object_angular_speed <= self._object_angular_stationary_threshold_radps
+            and self._object_linear_speed <= linear_limit
+            and self._object_angular_speed <= angular_limit
         )
         return robot_stationary, object_stationary, robot_stationary and object_stationary
 
@@ -840,10 +847,18 @@ class VLMClientNode(Node):
             if self._starting_box_center is not None
             else self._current_box_center
         )
-        target = source_center + self._default_place_distance_m * _GLOBAL_X_WORLD
+        offset = (BUCKET_PLACE_OFFSET_WORLD_M if getattr(self, "_selected_object_type", None) == "bucket"
+                  else self._default_place_distance_m * _GLOBAL_X_WORLD)
+        target = source_center + offset
         if getattr(self, "_selected_object_type", None) != "bucket":
             target[2] = self._box_size_xyz[2] / 2.0
         return target
+
+    def _bucket_placement_quat(self, start_quat: np.ndarray) -> np.ndarray:
+        """Turn left about world Z relative to the bucket's starting orientation."""
+        return _normalize_quat_wxyz(_quat_wxyz_multiply(
+            _yaw_to_quat_wxyz(math.radians(BUCKET_PLACE_YAW_OFFSET_DEG)), start_quat,
+        ))
 
     def initialize_task_target_once(self, object_type: str | None = None) -> bool:
         if object_type is not None and getattr(self, "_selected_object_type", None) is None:
@@ -853,8 +868,8 @@ class VLMClientNode(Node):
                 # first VLM decision. Bind it to the bucket once that decision
                 # arrives, before sending any request to the retargeter.
                 start_center, start_quat = self._fixed_start_box_pose()
-                self._task_target_box_center[2] = start_center[2]
-                self._task_target_box_quat_wxyz = _normalize_quat_wxyz(start_quat)
+                self._task_target_box_center = start_center + BUCKET_PLACE_OFFSET_WORLD_M
+                self._task_target_box_quat_wxyz = self._bucket_placement_quat(start_quat)
                 self._update_box_forward_axis_from_robot_once()
         if self._task_target_box_center is not None:
             return True
@@ -864,11 +879,10 @@ class VLMClientNode(Node):
         if not self._update_box_forward_axis_from_robot_once():
             return False
         self._task_target_box_center = self._default_task_target_box_center()
-        # Keep the bucket's observed starting orientation through carry/place.
-        # The retargeter preserves the authored robot-to-bucket heading and
-        # lateral offset; do not introduce a turn toward the bucket or world X.
+        # Rotate the bucket's placement from its observed starting orientation;
+        # retargeting preserves the authored robot-to-bucket lateral stance.
         nominal_target_quat = _normalize_quat_wxyz(
-            self._fixed_start_box_pose()[1]
+            self._bucket_placement_quat(self._fixed_start_box_pose()[1])
             if getattr(self, "_selected_object_type", None) == "bucket"
             else self._default_target_box_quat_wxyz.copy()
         )
@@ -889,8 +903,9 @@ class VLMClientNode(Node):
             "Initialized fixed task target box pose",
             target_box_position_xyz=self._task_target_box_center.tolist(),
             target_box_quat_wxyz=self._task_target_box_quat_wxyz.tolist(),
-            target_direction_world_xyz=_GLOBAL_X_WORLD.tolist(),
-            target_source="starting_box_pose_plus_global_x",
+            target_direction_world_xyz=(BUCKET_PLACE_OFFSET_WORLD_M / np.linalg.norm(BUCKET_PLACE_OFFSET_WORLD_M)
+                                        if getattr(self, "_selected_object_type", None) == "bucket" else _GLOBAL_X_WORLD).tolist(),
+            target_source="starting_object_pose_plus_world_offset",
             box_forward_axis=self.box_forward_axis,
         )
         return True
@@ -938,7 +953,8 @@ class VLMClientNode(Node):
             "object_to_target_xy_distance_m": object_to_target_xy,
             "target_box_position_xyz": None if target_box_center is None else target_box_center.tolist(),
             "target_box_source": target_box_source,
-            "target_direction_world_xyz": _GLOBAL_X_WORLD.tolist(),
+            "target_direction_world_xyz": (BUCKET_PLACE_OFFSET_WORLD_M / np.linalg.norm(BUCKET_PLACE_OFFSET_WORLD_M)
+                                           if getattr(self, "_selected_object_type", None) == "bucket" else _GLOBAL_X_WORLD).tolist(),
             "starting_box_position_xyz": None
             if self._starting_box_center is None
             else self._starting_box_center.tolist(),
@@ -1134,25 +1150,16 @@ class VLMClientNode(Node):
                 % (object_to_manipulate, response.next_keyframe)
             )
         response.object_in_manipulation = object_to_manipulate
-        if object_to_manipulate:
-            self._update_box_forward_axis_from_robot_once()
-
         start_box_center, start_box_quat = self._fixed_start_box_pose()
-        retarget_current_box_source = (
-            "fixed_start_box_pose"
-            if phase in _FIXED_START_POSE_KEYFRAMES
-            else "current_box_pose"
-        )
-        retarget_current_box_center = (
-            start_box_center
-            if phase in _FIXED_START_POSE_KEYFRAMES
-            else self._current_box_center
-        )
-        retarget_current_box_quat = (
-            start_box_quat
-            if phase in _FIXED_START_POSE_KEYFRAMES
-            else self._current_box_quat_wxyz
-        )
+        retarget_current_box_source = "current_box_pose"
+        retarget_current_box_center = self._current_box_center.copy()
+        retarget_current_box_quat = self._current_box_quat_wxyz
+        if phase == "stand_after_pick":
+            # Follow any horizontal movement during grasp, while anchoring the
+            # lift height and orientation so retries do not accumulate lift.
+            retarget_current_box_center[2] = start_box_center[2]
+            retarget_current_box_quat = start_box_quat
+            retarget_current_box_source = "current_box_xy_with_start_z_and_orientation"
         current_box_pose_msg = self._pose_stamped_from(
             center=retarget_current_box_center,
             quat_wxyz=retarget_current_box_quat,
@@ -1166,6 +1173,12 @@ class VLMClientNode(Node):
                 "missing_task_target",
                 "Cannot publish planner outputs without a fixed task target box position",
             )
+            return False
+
+        # Approach is locomotion, but still needs object-frame alignment. Select
+        # the axis before the retargeter latches it on the first request.
+        if not self._update_box_forward_axis_from_robot_once():
+            self.publish_status("missing_pickup_axis", "Cannot select the object's pickup forward axis")
             return False
 
         target_box_center = self._task_target_box_center.copy()
@@ -1183,7 +1196,7 @@ class VLMClientNode(Node):
 
         target_root_center = self._default_target_root_center.copy()
         target_root_quat = self._default_target_root_quat_wxyz.copy()
-        # Bucket stand-before-pick ignores this root hint: the retargeter places
+        # Bucket approach and stand-before-pick ignore this root hint: the retargeter places
         # the library's left-offset stance relative to the observed bucket.
         if phase == "approach":
             target_root_center, target_root_quat = self._approach_root_pose()
