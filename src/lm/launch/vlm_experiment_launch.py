@@ -1,6 +1,7 @@
 """One entry point for robot/monitor, VLM services, and the planner GUI."""
 
 import os
+import uuid
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -19,6 +20,21 @@ def _mode_default(sim_value, real_value):
     return PythonExpression([
         repr(real_value), " if '", LaunchConfiguration("mode"), "' == 'real' else ", repr(sim_value),
     ])
+
+
+def _configure_sim_scene(context):
+    if LaunchConfiguration("mode").perform(context) != "sim":
+        return []
+    object_type = LaunchConfiguration("scene_object").perform(context)
+    scene = LaunchConfiguration("sim_scene_xml").perform(context).strip()
+    scene = scene or f"g1_description/scene_crl_with_{object_type}.xml"
+    # The simulator, monitor and image renderer must load the same model.
+    context.launch_configurations["sim_scene_xml"] = scene
+    context.launch_configurations["camera_robot_xml"] = os.path.join(
+        get_package_share_directory("crl_humanoid_commons"), "data", "robots", scene,
+    )
+    context.launch_configurations["camera_object_joint_name"] = f"{object_type}_freejoint"
+    return []
 
 
 def _robot_launch(context):
@@ -60,6 +76,7 @@ def _planner_app(context):
         "tracked_box_pose_topic", "tracked_bucket_pose_topic",
     )}
     parameters["box_size_xyz"] = parse_box_size_xyz(value("box_size_xyz")).tolist()
+    parameters["vlm_request_image_topic"] = ParameterValue(value("request_image_topic"), value_type=str)
     parameters["stand_before_pick_distance_m"] = float(value("stand_before_pick_distance_m"))
     parameters["bucket_pick_max_horizontal_distance_m"] = float(value("bucket_pick_max_horizontal_distance_m"))
     parameters["supervised_mode"] = IfCondition(LaunchConfiguration("supervised_mode")).evaluate(context)
@@ -73,6 +90,7 @@ def _planner_app(context):
 
 
 def generate_launch_description():
+    experiment_prefix = f"/vlm/experiment_{uuid.uuid4().hex}"
     return LaunchDescription([
         DeclareLaunchArgument("mode", default_value="sim", choices=["sim", "real"],
                               description="Real starts hardware/OptiTrack; neither mode starts a task automatically."),
@@ -94,6 +112,14 @@ def generate_launch_description():
         DeclareLaunchArgument("camera_backend", default_value=_mode_default("mujoco", "usb")),
         DeclareLaunchArgument("monitor_topic", default_value=_mode_default("/g1_sim/monitor", "/g1_hardware/monitor")),
         DeclareLaunchArgument("camera_frame_id", default_value=_mode_default("vlm_camera", "usb_camera_optical_frame")),
+        # A previous launch's renderer must not feed this experiment's VLM.
+        # Both the camera and server inherit this launch's private image topic.
+        DeclareLaunchArgument("image_topic", default_value=experiment_prefix + "/image_raw",
+                              description="Camera input shared by this experiment's renderer and VLM server."),
+        DeclareLaunchArgument("service_name", default_value=experiment_prefix + "/query"),
+        DeclareLaunchArgument("request_image_topic", default_value=experiment_prefix + "/request_image"),
+        DeclareLaunchArgument("render_image_service", default_value=_mode_default(experiment_prefix + "/render_image", "")),
+        OpaqueFunction(function=_configure_sim_scene),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(os.path.join(
                 get_package_share_directory("lm"), "launch", "vlm_launch.py",

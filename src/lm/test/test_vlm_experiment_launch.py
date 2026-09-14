@@ -6,7 +6,7 @@ from unittest.mock import Mock
 
 import pytest
 from launch import LaunchContext
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
 from launch.utilities import normalize_to_list_of_substitutions, perform_substitutions
 from launch_ros.utilities import evaluate_parameters, normalize_parameters
 
@@ -27,10 +27,14 @@ def launch_module(monkeypatch, tmp_path):
 def context_for(module, **overrides):
     context = LaunchContext()
     context.launch_configurations.update(overrides)
+    included_stack = False
     for action in module["generate_launch_description"]().entities:
         if isinstance(action, DeclareLaunchArgument):
             action.execute(context)
+        elif isinstance(action, OpaqueFunction) and not included_stack:
+            action.execute(context)
         elif isinstance(action, IncludeLaunchDescription):
+            included_stack = True
             # Apply include overrides and declarations only. Never visit nodes.
             for name, value in action.launch_arguments:
                 context.launch_configurations[name] = perform_substitutions(context, normalize_to_list_of_substitutions(value))
@@ -41,6 +45,50 @@ def context_for(module, **overrides):
     return context
 
 
+@pytest.mark.parametrize("object_type", ["box", "bucket"])
+@pytest.mark.parametrize("override", ["", "g1_description/custom.xml", "/tmp/custom_scene.xml"])
+def test_camera_and_simulator_share_scene(launch_module, object_type, override):
+    context = context_for(launch_module, scene_object=object_type, sim_scene_xml=override)
+    include = launch_module["_robot_launch"](context)[0]
+    forwarded = {name: perform_substitutions(context, normalize_to_list_of_substitutions(value))
+                 for name, value in include.launch_arguments}
+    scene = override or f"g1_description/scene_crl_with_{object_type}.xml"
+    assert forwarded["sim_scene_xml"] == scene
+    root = Path(launch_module["get_package_share_directory"]("crl_humanoid_commons")) / "data/robots"
+    assert context.launch_configurations["camera_robot_xml"] == str(root / scene)
+    assert context.launch_configurations["camera_object_joint_name"] == f"{object_type}_freejoint"
+
+
+def test_experiments_do_not_share_camera_topic(launch_module, monkeypatch):
+    first = context_for(launch_module, scene_object="bucket")
+    second = context_for(launch_module, scene_object="box")
+    for name in ("image_topic", "service_name", "request_image_topic", "render_image_service"):
+        assert first.launch_configurations[name] != second.launch_configurations[name]
+    app_fn = launch_module["_planner_app"]
+    monkeypatch.setitem(app_fn.__globals__, "Node", lambda **kwargs: kwargs)
+    app = app_fn(second)[0]
+    args = app["arguments"]
+    assert args[args.index("--service") + 1] == second.launch_configurations["service_name"]
+    params = evaluate_parameters(second, normalize_parameters(app["parameters"]))[0]
+    assert params["vlm_request_image_topic"] == second.launch_configurations["request_image_topic"]
+    stack = runpy.run_path(str(Path(__file__).resolve().parents[1] / "launch/vlm_launch.py"))
+    nodes = []
+    def capture(**kwargs):
+        nodes.append(kwargs)
+        return OpaqueFunction(function=lambda _: [])
+    monkeypatch.setitem(stack["generate_launch_description"].__globals__, "Node", capture)
+    stack["generate_launch_description"]()
+    server = next(node for node in nodes if node.get("executable") == "vlm_server")
+    server_params = evaluate_parameters(second, normalize_parameters(server["parameters"]))[0]
+    for name in ("image_topic", "service_name", "request_image_topic", "render_image_service"):
+        assert server_params[name] == second.launch_configurations[name]
+    camera = next(node for node in nodes if node.get("executable") == "scene_camera")
+    camera_params = evaluate_parameters(second, normalize_parameters(camera["parameters"]))[0]
+    assert camera_params["render_image_service"] == server_params["render_image_service"]
+    custom = context_for(launch_module, image_topic="/custom/image")
+    assert custom.launch_configurations["image_topic"] == "/custom/image"
+
+
 @pytest.mark.parametrize("mode,backend,monitor,robot_launch", [
     ("sim", "mujoco", "/g1_sim/monitor", "g1_keyframe_sim.py"),
     ("real", "usb", "/g1_hardware/monitor", "g1_keyframe.py"),
@@ -48,6 +96,7 @@ def context_for(module, **overrides):
 def test_mode_wiring_without_duplicate_planner(launch_module, monkeypatch, mode, backend, monitor, robot_launch):
     context = context_for(launch_module, mode=mode, start_client="true")
     assert context.launch_configurations["camera_backend"] == backend
+    assert bool(context.launch_configurations["render_image_service"]) == (mode == "sim")
     assert context.launch_configurations["monitor_topic"] == monitor
     assert context.launch_configurations["start_client"] == "false"
     app_fn = launch_module["_planner_app"]

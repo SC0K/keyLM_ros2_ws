@@ -73,6 +73,8 @@ def generate_launch_description() -> LaunchDescription:
     return LaunchDescription(
         [
             DeclareLaunchArgument("image_topic", default_value="/camera/image_raw"),
+            DeclareLaunchArgument("request_image_topic", default_value="/vlm/request_image"),
+            DeclareLaunchArgument("render_image_service", default_value=""),
             DeclareLaunchArgument("rate_hz", default_value="2.0"),
             DeclareLaunchArgument("camera_backend", default_value="mujoco"),
             DeclareLaunchArgument("camera_device", default_value="/dev/video0",
@@ -212,6 +214,7 @@ def generate_launch_description() -> LaunchDescription:
                         "height": camera_height,
                         "frame_id": camera_frame_id,
                         "robot_xml": camera_robot_xml,
+                        "render_image_service": ParameterValue(LaunchConfiguration("render_image_service"), value_type=str),
                         "monitor_topic": monitor_topic,
                         "object_pose_topic": actual_box_pose_topic,
                         "object_joint_name": LaunchConfiguration("camera_object_joint_name"),
@@ -234,6 +237,8 @@ def generate_launch_description() -> LaunchDescription:
                         "ollama_host": ParameterValue(LaunchConfiguration("ollama_host"), value_type=str),
                         "model_name": ParameterValue(LaunchConfiguration("model_name"), value_type=str),
                         "image_topic": image_topic,
+                        "request_image_topic": LaunchConfiguration("request_image_topic"),
+                        "render_image_service": ParameterValue(LaunchConfiguration("render_image_service"), value_type=str),
                     }
                 ],
             ),
