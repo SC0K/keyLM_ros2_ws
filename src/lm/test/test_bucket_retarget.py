@@ -57,14 +57,28 @@ def test_bucket_selects_only_right_hand(bucket_frame):
 
 
 @pytest.mark.parametrize("bucket_frame", [2, 3, 4, 5], indirect=True)
-def test_bucket_identity_ignores_sizes_and_box_axes(bucket_frame):
+def test_bucket_identity_ignores_sizes_when_axes_match(bucket_frame):
     _, qpos, source = bucket_frame
     target = BoxFrame(source.center, np.array([0.9, 0.1, 0.8]), source.quat_wxyz)
-    result = run(bucket_frame, target, source_forward_axis="y", source_up_axis="-z")
+    result = run(bucket_frame, target)
     np.testing.assert_array_equal(result.qpos, qpos)
     assert result.hand_targets.shape == (1, 3)
     assert result.source_forward_axis == result.target_forward_axis == "x"
     assert result.source_up_axis == result.target_up_axis == "z"
+
+
+def test_bucket_honors_selected_target_forward_axis_without_scaling(bucket_frame):
+    model, qpos, source = bucket_frame
+    source = BoxFrame(source.center, source.size, np.array([1., 0., 0., 0.]))
+    target = BoxFrame(source.center, np.array([.9, .1, .8]), source.quat_wxyz)
+    result = run((model, qpos, source), target, target_forward_axis="y")
+    data = mujoco.MjData(model)
+    data.qpos[:] = qpos
+    mujoco.mj_forward(model, data)
+    rotation = np.array([[0., -1., 0.], [1., 0., 0.], [0., 0., 1.]])
+    expected = rotation @ (data.xpos[model.body("right_flat_hand").id] - source.center) + source.center
+    np.testing.assert_allclose(result.hand_targets[0], expected, atol=1e-8)
+    assert result.source_forward_axis == "x" and result.target_forward_axis == "y"
 
 
 @pytest.mark.parametrize("bucket_frame", [2, 3, 4, 5], indirect=True)

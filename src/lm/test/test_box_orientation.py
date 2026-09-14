@@ -85,7 +85,7 @@ def test_vlm_latches_the_nominal_physical_target_once() -> None:
 @pytest.mark.parametrize("start_yaw", [0., 73., -160.])
 def test_bucket_task_offsets_position_and_turns_left_from_start(preinitialized_sim_target, start_yaw):
     from unittest.mock import Mock
-    from lm.vml import VLMClientNode
+    from lm.vml import VLMClientNode, BUCKET_PLACE_OFFSET_WORLD_M, BUCKET_PLACE_YAW_OFFSET_DEG
 
     node = VLMClientNode.__new__(VLMClientNode)
     node._selected_object_type = None if preinitialized_sim_target else "bucket"
@@ -104,18 +104,20 @@ def test_bucket_task_offsets_position_and_turns_left_from_start(preinitialized_s
     node.publish_status = Mock()
 
     assert node.initialize_task_target_once("bucket")
-    expected = quat_wxyz_from_rpy_deg(np.array([0., 0., start_yaw + 45.]))
+    assert BUCKET_PLACE_YAW_OFFSET_DEG == 90.
+    expected = quat_wxyz_from_rpy_deg(np.array([0., 0., start_yaw + BUCKET_PLACE_YAW_OFFSET_DEG]))
     np.testing.assert_allclose(_rotmat_from_quat_wxyz(node._task_target_box_quat_wxyz),
                                _rotmat_from_quat_wxyz(expected), atol=1e-12)
-    np.testing.assert_allclose(node._task_target_box_center, [2., 2., .02])
-    assert node.box_forward_axis == "x"
+    expected_position = start + BUCKET_PLACE_OFFSET_WORLD_M
+    np.testing.assert_allclose(node._task_target_box_center, expected_position)
+    assert node.box_forward_axis == "-y"
     # Later observations must not make a fixed placement target drift.
     latched = node._task_target_box_quat_wxyz.copy()
     observed[:] = [1., 0., 0., 0.]
     start[:] = [5., -3., .02]
     assert node.initialize_task_target_once("bucket")
     np.testing.assert_array_equal(node._task_target_box_quat_wxyz, latched)
-    np.testing.assert_allclose(node._task_target_box_center, [2., 2., .02])
+    np.testing.assert_allclose(node._task_target_box_center, expected_position)
 
 
 @pytest.mark.parametrize("source_height", [0.73, 0.9336])

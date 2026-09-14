@@ -61,6 +61,7 @@ def _planner_app(context):
     )}
     parameters["box_size_xyz"] = parse_box_size_xyz(value("box_size_xyz")).tolist()
     parameters["stand_before_pick_distance_m"] = float(value("stand_before_pick_distance_m"))
+    parameters["bucket_pick_max_horizontal_distance_m"] = float(value("bucket_pick_max_horizontal_distance_m"))
     parameters["supervised_mode"] = IfCondition(LaunchConfiguration("supervised_mode")).evaluate(context)
     parameters["mocap_object_selection"] = IfCondition(LaunchConfiguration("mocap_object_selection")).evaluate(context)
     parameters["tracked_object_timeout_sec"] = float(value("tracked_object_timeout_sec"))

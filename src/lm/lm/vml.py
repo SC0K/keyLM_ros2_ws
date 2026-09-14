@@ -187,6 +187,7 @@ class VLMClientNode(Node):
         # XY root-to-box-center distance, not clearance from the box surface.
         self.declare_parameter("stand_before_pick_distance_m", 0.4)
         self.declare_parameter("pick_max_horizontal_distance_m", 0.45)
+        self.declare_parameter("bucket_pick_max_horizontal_distance_m", 0.60)
         self.declare_parameter("min_stand_root_height_m", 0.78)
         self.declare_parameter("default_target_root_center", [0.0, 0.0, 0.78])  # TODO: find the correct target root pose for root mode (navifation)
         self.declare_parameter("default_target_root_quat_wxyz", [ 1.0, 0.0, 0.0,  0.0])
@@ -256,6 +257,12 @@ class VLMClientNode(Node):
         self._pick_max_horizontal_distance_m = float(
             self.get_parameter("pick_max_horizontal_distance_m").value
         )
+        self._bucket_pick_max_horizontal_distance_m = float(
+            self.get_parameter("bucket_pick_max_horizontal_distance_m").value
+        )
+        for name in ("pick_max_horizontal_distance_m", "bucket_pick_max_horizontal_distance_m"):
+            if not math.isfinite(getattr(self, "_" + name)) or getattr(self, "_" + name) <= 0.0:
+                raise ValueError(f"{name} must be finite and positive")
         self._min_stand_root_height_m = float(self.get_parameter("min_stand_root_height_m").value)
         self._stationary_hold_sec = float(self.get_parameter("stationary_hold_sec").value)
         self._min_action_duration_sec = float(self.get_parameter("min_action_duration_sec").value)
@@ -688,12 +695,8 @@ class VLMClientNode(Node):
 
     def _update_box_forward_axis_from_robot_once(self) -> bool:
         """Latch the physical box axis aligned with the desired pickup approach."""
-        if getattr(self, "_selected_object_type", None) == "bucket":
-            # Bucket motions use the physical +X frame and the library's
-            # right-hand/lateral stance, not a box face nearest to the robot.
-            self.box_forward_axis = "x"
-            self._box_forward_axis_initialized_from_robot = True
-            return True
+        # Both object types select the observed axis facing the desired pickup
+        # approach. Bucket lateral stance is preserved by the retargeter.
         if self._box_forward_axis_initialized_from_robot:
             return True
         if not self._has_actual_box_pose:
@@ -917,7 +920,14 @@ class VLMClientNode(Node):
             return self._default_task_target_box_center()
         return None
 
+    def _active_pick_max_horizontal_distance_m(self) -> float:
+        """Use the selected object's reach tolerance without moving its goal."""
+        if getattr(self, "_selected_object_type", None) == "bucket":
+            return self._bucket_pick_max_horizontal_distance_m
+        return self._pick_max_horizontal_distance_m
+
     def _distance_context(self) -> dict:
+        pick_max_distance = self._active_pick_max_horizontal_distance_m()
         have_robot = self._has_robot_root_pose or self._has_monitor
         robot_to_object = None
         robot_to_object_xy = None
@@ -927,7 +937,7 @@ class VLMClientNode(Node):
             robot_to_object_xy = float(np.linalg.norm(robot_to_object_vec[:2]))
         pick_within_horizontal_reach = (
             robot_to_object_xy is not None
-            and robot_to_object_xy <= self._pick_max_horizontal_distance_m
+            and robot_to_object_xy <= pick_max_distance
         )
 
         target_box_center = self._context_target_box_center()
@@ -947,7 +957,7 @@ class VLMClientNode(Node):
         return {
             "robot_to_object_distance_m": robot_to_object,
             "robot_to_object_xy_distance_m": robot_to_object_xy,
-            "pick_max_horizontal_distance_m": self._pick_max_horizontal_distance_m,
+            "pick_max_horizontal_distance_m": pick_max_distance,
             "pick_within_horizontal_reach": bool(pick_within_horizontal_reach),
             "object_to_target_distance_m": object_to_target,
             "object_to_target_xy_distance_m": object_to_target_xy,
@@ -1020,6 +1030,7 @@ class VLMClientNode(Node):
         )
         finished = self.ready_for_next_request()
         success = self.evaluate_last_action_success() if finished else self._last_action_success
+        pick_max_distance = self._active_pick_max_horizontal_distance_m()
         context = {
             "selected_object_type": getattr(self, "_selected_object_type", None),
             "previous_action_phase": keyframe_phase(self._last_action_name or "none"),
@@ -1059,7 +1070,7 @@ class VLMClientNode(Node):
                 "object_position_error_m": self._object_position_success_threshold_m,
                 "object_orientation_error_rad": None,
                 "object_orientation_ignored": True,
-                "stand_before_pick_robot_to_box_xy_m": self._pick_max_horizontal_distance_m,
+                "stand_before_pick_robot_to_box_xy_m": pick_max_distance,
             },
             "task_completion_thresholds": {
                 "object_position_error_m": self._task_object_position_threshold_m,
@@ -1071,11 +1082,11 @@ class VLMClientNode(Node):
                 "For the first request previous_action is none. For later requests previous_action is the keyframe selected by the previous VLM response. "
                 "If previous_action_finished is true and previous_action_success is false, the previous keyframe stopped with tracking or object error above threshold. "
                 "Object success and task completion use box position only; object orientation errors are diagnostic and ignored. "
-                f"The approach and stand_before_pick actions are also successful when the robot root is within {self._pick_max_horizontal_distance_m:g} m in the XY plane of the current box center. "
+                f"The approach and stand_before_pick actions are also successful when the robot root is within {pick_max_distance:g} m in the XY plane of the selected object center. "
                 "Choose the object library from the task text and image: _box for two-hand box motions, _bucket for right-hand bucket/handle motions. All phase names in these notes require that suffix. "
                 "Use the image to check the appropriate grasp (two hands for a box, right hand for a bucket) during carry/place phases, or whether the object has slipped, dropped, or is not controlled. "
-                f"Select crouch_to_pick only when distance_context.pick_within_horizontal_reach is true, meaning robot_to_object_xy_distance_m is at most {self._pick_max_horizontal_distance_m:g} m. "
-                f"Before pickup, if that distance is greater than {self._pick_max_horizontal_distance_m:g} m or unavailable, select approach (locomotion). Once within reach, select stand_before_pick to prepare the grasp. Never use approach while holding the box. "
+                f"Select crouch_to_pick only when distance_context.pick_within_horizontal_reach is true, meaning robot_to_object_xy_distance_m is at most {pick_max_distance:g} m. "
+                f"Before pickup, if that distance is greater than {pick_max_distance:g} m or unavailable, select approach (locomotion). Once within reach, select stand_before_pick to prepare the grasp. Never use approach while holding the object. "
                 "On failure, do not advance to the next semantic phase; retry the previous keyframe when safe, or choose a safe standing/setup keyframe before retrying. "
                 "For failed pick actions, use approach if out of reach and not holding the box; otherwise recover with stand_before_pick before retrying crouch_to_pick. "
                 "For failed place actions such as stand_before_place or crouch_to_place, retry the failed place keyframe if still safe, or recover with stand_before_place before retrying crouch_to_place. "

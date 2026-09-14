@@ -114,6 +114,8 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("tracking_error_topic", default_value="/tracking_errors"),
             DeclareLaunchArgument("stand_before_pick_distance_m", default_value="0.4",
                                   description="Stand-before-pick root distance from box center in XY (meters)."),
+            DeclareLaunchArgument("bucket_pick_max_horizontal_distance_m", default_value="0.60",
+                                  description="Bucket pickup reach tolerance from root to object center in XY; does not move the goal."),
             DeclareLaunchArgument(
                 "box_size_xyz",
                 default_value=PythonExpression(
@@ -300,6 +302,8 @@ def generate_launch_description() -> LaunchDescription:
                                 "tracking_error_topic": tracking_error_topic,
                                 "stand_before_pick_distance_m": ParameterValue(
                                     LaunchConfiguration("stand_before_pick_distance_m"), value_type=float),
+                                "bucket_pick_max_horizontal_distance_m": ParameterValue(
+                                    LaunchConfiguration("bucket_pick_max_horizontal_distance_m"), value_type=float),
                                 "box_size_xyz": box_size_xyz,
                                 "default_box_forward_axis": box_hold_forward_axis,
                                 "retarget_keyframe_service": retarget_keyframe_service,

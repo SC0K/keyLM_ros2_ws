@@ -531,11 +531,9 @@ class KeyframeRetargeterNode(Node):
         source_quat, _, _ = self._source_object_quat(payload)
         target = self._current_box_center if name in _PICK_POSE_KEYFRAMES else self._target_box_center
         target_quat = self._current_box_quat_wxyz if name in _PICK_POSE_KEYFRAMES else self._target_box_quat_wxyz
-        sf, su, tf, tu = (self._source_box_forward_axis, self._source_box_up_axis,
-                          self._box_hold_forward_axis, self._box_hold_up_axis)
-        if self._retarget_object_type == "bucket":
-            sf = tf = "x"
-            su = tu = "z"
+        sf, su = self._source_alignment_axes()
+        tf = self._box_hold_forward_axis
+        tu = "z" if self._retarget_object_type == "bucket" else self._box_hold_up_axis
         yaw = (_yaw_from_matched_rotation(matched_box_rotation(target_quat, tf, tu))
                - _yaw_from_matched_rotation(matched_box_rotation(source_quat, sf, su)))
         delta_q = _yaw_to_quat_wxyz(yaw)
@@ -732,13 +730,14 @@ class KeyframeRetargeterNode(Node):
                 body_rotations[i] = self._ik_data.xquat[bid]
             self._write_body_arrays(payload, body_positions, body_rotations)
 
-    def _infer_source_forward_axis(self, root_quat_wxyz: np.ndarray, src_box_quat_wxyz: np.ndarray) -> str:
+    def _infer_source_forward_axis(self, root_quat_wxyz: np.ndarray, src_box_quat_wxyz: np.ndarray,
+                                   source_up_axis: str | None = None) -> str:
         root_rot = _quat_wxyz_to_rotmat(root_quat_wxyz)
         root_forward = root_rot @ np.array([1.0, 0.0, 0.0], dtype=np.float64)
         root_forward[2] = 0.0
         root_forward = _normalize_vec(root_forward, np.array([1.0, 0.0, 0.0], dtype=np.float64))
         box_rot = _quat_wxyz_to_rotmat(src_box_quat_wxyz)
-        source_up_dimension = _axis_dimension_index(self._source_box_up_axis)
+        source_up_dimension = _axis_dimension_index(source_up_axis or self._source_box_up_axis)
         axis_world = {
             label: _normalize_vec(box_rot @ vec, np.array([1.0, 0.0, 0.0], dtype=np.float64))
             for label, vec in _AXIS_TO_LOCAL_VEC.items()
@@ -764,29 +763,38 @@ class KeyframeRetargeterNode(Node):
         src_quat = _quat_wxyz_normalize(stored_src_quat)
         return src_quat, stored_src_quat, stored_frame
 
-    def _infer_library_source_forward_axis(self, fallback_axis: str) -> str:
-        pickup_path = self._library_dir / "crouch_to_pick_box.npz"
-        if not pickup_path.exists():
+    def _source_alignment_axes(self) -> tuple[str, str]:
+        if self._retarget_object_type == "bucket":
+            if not hasattr(self, "_bucket_source_forward_axis"):
+                self._bucket_source_forward_axis = self._infer_library_source_forward_axis("x", "bucket")
+            return self._bucket_source_forward_axis, "z"
+        return self._source_box_forward_axis, self._source_box_up_axis
+
+    def _infer_library_source_forward_axis(self, fallback_axis: str, object_type: str = "box") -> str:
+        pickup_name = f"crouch_to_pick_{object_type}"
+        pickup_path = self._library_dir / f"{pickup_name}.npz"
+        if not pickup_path.exists() and object_type == "box":
             pickup_path = self._library_dir / "crouch_to_pick.npz"
+            pickup_name = "crouch_to_pick"
         if not pickup_path.exists():
             self.get_logger().warning(
-                "No crouch_to_pick.npz in the keyframe library; using configured "
+                f"No {pickup_name}.npz in the keyframe library; using configured "
                 f"source_box_forward_axis={fallback_axis}."
             )
             return fallback_axis
-        payload = self._load_payload("crouch_to_pick")
+        payload = self._load_payload(pickup_name)
         if "object_quat_wxyz" not in payload:
             self.get_logger().warning(
-                "crouch_to_pick has no object quaternion; using configured "
+                f"{pickup_name} has no object quaternion; using configured "
                 f"source_box_forward_axis={fallback_axis}."
             )
             return fallback_axis
         qpos = self._build_qpos_from_payload(payload)
         source_quat, _, _ = self._source_object_quat(payload)
-        inferred_axis = self._infer_source_forward_axis(qpos[3:7], source_quat)
+        inferred_axis = self._infer_source_forward_axis(
+            qpos[3:7], source_quat, "z" if object_type == "bucket" else self._source_box_up_axis)
         self.get_logger().info(
-            "Latched reference pickup axis from crouch_to_pick: %s"
-            % inferred_axis
+            "Latched reference pickup axis from %s: %s" % (pickup_name, inferred_axis)
         )
         return inferred_axis
 
@@ -822,6 +830,7 @@ class KeyframeRetargeterNode(Node):
             size=self._box_size_xyz.copy(),
             quat_wxyz=preferred_dst_quat,
         )
+        source_forward, source_up = self._source_alignment_axes()
         result = retarget_qpos_for_box_grasp(
             self._ik_model,
             self._ik_data,
@@ -830,10 +839,10 @@ class KeyframeRetargeterNode(Node):
             target_box=dst_box_used,
             hand_body_ids=self._ik_ee_body_ids,
             foot_body_ids=self._ik_foot_body_ids,
-            source_forward_axis=self._source_box_forward_axis,
-            source_up_axis=self._source_box_up_axis,
+            source_forward_axis=source_forward,
+            source_up_axis=source_up,
             target_forward_axis=self._box_hold_forward_axis,
-            target_up_axis=self._box_hold_up_axis,
+            target_up_axis="z" if self._retarget_object_type == "bucket" else self._box_hold_up_axis,
             fixed_foot_weight=self._ik_foot_constraint_weight,
             max_foot_residual_m=self._ik_max_foot_residual_m,
             object_type=self._retarget_object_type,

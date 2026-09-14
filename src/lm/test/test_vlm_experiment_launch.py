@@ -57,6 +57,7 @@ def test_mode_wiring_without_duplicate_planner(launch_module, monkeypatch, mode,
     params = evaluate_parameters(context, normalize_parameters(app["parameters"]))[0]
     assert params["monitor_topic"] == monitor
     assert params["robot_root_pose_topic"] == ""
+    assert params["bucket_pick_max_horizontal_distance_m"] == .60
     include = launch_module["_robot_launch"](context)[0]
     include.launch_description_source.get_launch_description(context)
     assert include.launch_description_source.location.endswith(robot_launch)
@@ -68,6 +69,7 @@ def test_custom_topics_server_and_external_tunnel(launch_module, monkeypatch):
         local_port="11435", actual_box_pose_topic="/custom/box", retargeted_keyframe_topic="/custom/goals",
         retarget_keyframe_service="/custom/retarget", box_size_xyz="0.3 0.4 0.5",
         box_hold_forward_axis="y", task_text="Place the box.", stand_before_pick_distance_m="0.42",
+        bucket_pick_max_horizontal_distance_m="0.65",
     )
     app_fn = launch_module["_planner_app"]
     monkeypatch.setitem(app_fn.__globals__, "Node", lambda **kwargs: kwargs)
@@ -83,6 +85,7 @@ def test_custom_topics_server_and_external_tunnel(launch_module, monkeypatch):
     assert params["retarget_keyframe_service"] == "/custom/retarget"
     assert tuple(params["box_size_xyz"]) == (.3, .4, .5)
     assert params["stand_before_pick_distance_m"] == .42
+    assert params["bucket_pick_max_horizontal_distance_m"] == .65
     assert launch_module["_robot_launch"](context) == []
 
 

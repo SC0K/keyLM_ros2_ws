@@ -517,7 +517,7 @@ def retarget_qpos_for_box_grasp(
     """Retarget a box or bucket grasp while preserving grounded foot poses.
 
     Boxes scale both hand targets. Buckets rigidly transform only the right
-    hand, ignoring dimensions and semantic box-axis remapping.
+    hand, ignoring dimensions while honoring the selected forward/up axes.
 
     The selected physical forward/up axes first define canonical semantic box
     frames.  Their dimensions are reordered into ``[forward, side, up]`` and
@@ -571,12 +571,6 @@ def retarget_qpos_for_box_grasp(
             raise ValueError(f"Invalid MuJoCo body ID {body_id}")
     if bucket and not model.body(hand_ids[0]).name.startswith("right_"):
         raise ValueError("Bucket retargeting requires a right-hand body")
-
-    # The same bucket mesh/origin is used in reference and deployment. Do not
-    # reinterpret it using the box's source +Y/-Z and target +X/+Z conventions.
-    if bucket:
-        source_forward_axis = target_forward_axis = "x"
-        source_up_axis = target_up_axis = "z"
 
     source_center = np.asarray(source_box.center, dtype=np.float64).reshape(3)
     target_center = np.asarray(target_box.center, dtype=np.float64).reshape(3)

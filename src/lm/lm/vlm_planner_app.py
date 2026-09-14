@@ -54,6 +54,7 @@ PLANNER_EXTRA_DEFAULTS = {
     "retarget_keyframe_service": "/retargeter/generate_keyframe",
     "retargeted_keyframe_topic": "/retargeter/output_keyframe",
     "stand_before_pick_distance_m": 0.4,
+    "bucket_pick_max_horizontal_distance_m": 0.60,
     "default_box_forward_axis": SIM_TARGET_BOX_GEOMETRY.forward_axis,
 }
 

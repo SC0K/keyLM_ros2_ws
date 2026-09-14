@@ -140,7 +140,7 @@ def test_bucket_right_hand_target_ignores_box_dimensions(retargeter):
     target = BoxFrame(center=source.center.copy(), quat_wxyz=source.quat_wxyz.copy(), size=np.array([1.2, .05, .8]))
     result = retarget_qpos_for_box_grasp(model, data, qpos=qpos, source_box=source, target_box=target,
                                         hand_body_ids=hands, foot_body_ids=feet, object_type="bucket", preserve_root_height=True,
-                                        source_forward_axis="y", source_up_axis="-z", target_forward_axis="x", target_up_axis="z")
+                                        source_forward_axis="x", source_up_axis="z", target_forward_axis="x", target_up_axis="z")
     np.testing.assert_allclose(result.qpos, qpos)
     np.testing.assert_allclose(result.hand_targets, current_hand)
 
@@ -332,12 +332,16 @@ def test_stand_before_pick_is_restored_to_manipulation(retargeter):
 
 @pytest.mark.parametrize("target_axis", ["x", "-x", "y", "-y"])
 @pytest.mark.parametrize("name", ["crouch_to_pick", "stand_after_pick", "stand_before_place", "crouch_to_place"])
-def test_no_ik_keeps_axis_alignment_and_physical_object_orientation(retargeter, name, target_axis):
+@pytest.mark.parametrize("kind", ["box", "bucket"])
+def test_no_ik_keeps_axis_alignment_and_physical_object_orientation(retargeter, name, target_axis, kind):
     retargeter._box_hold_forward_axis = target_axis
-    original = retargeter._load_payload(name)
     target_quat = (retargeter._current_box_quat_wxyz if name in ("crouch_to_pick", "stand_after_pick")
                    else retargeter._target_box_quat_wxyz)
-    source_forward = matched_box_rotation(original["object_quat_wxyz"], "y", "-z")[:2, 0]
+    name = f"{name}_{kind}"
+    retargeter._select_keyframe_object(name)
+    original = retargeter._load_payload(name)
+    sf, su = retargeter._source_alignment_axes()
+    source_forward = matched_box_rotation(original["object_quat_wxyz"], sf, su)[:2, 0]
     target_forward = matched_box_rotation(target_quat, target_axis, "z")[:2, 0]
     yaw = np.arctan2(target_forward[1], target_forward[0]) - np.arctan2(source_forward[1], source_forward[0])
     expected_rotation = _quat_wxyz_to_rotmat(_yaw_to_quat_wxyz(yaw))
@@ -346,12 +350,31 @@ def test_no_ik_keeps_axis_alignment_and_physical_object_orientation(retargeter, 
         blob, _ = retargeter._process_keyframe(name, True)
         with np.load(BytesIO(blob), allow_pickle=True) as result:
             np.testing.assert_array_equal(result["dof_positions"], original["dof_positions"])
+            np.testing.assert_array_equal(result["body_positions"][:, 2], original["body_positions"][:, 2])
             for before, after in zip(original["body_rotations"].reshape(-1, 4), result["body_rotations"].reshape(-1, 4)):
                 np.testing.assert_allclose(_quat_wxyz_to_rotmat(after), expected_rotation @ _quat_wxyz_to_rotmat(before), atol=2e-6)
             np.testing.assert_allclose(
                 _quat_wxyz_to_rotmat(result["object_quat_wxyz"]),
                 _quat_wxyz_to_rotmat(apply_target_box_orientation_offset(target_quat, offset)), atol=2e-6)
     retargeter._apply_box_ik.assert_not_called()
+
+
+def test_bucket_source_axis_is_inferred_from_its_pickup_and_cached(retargeter, monkeypatch):
+    payload = retargeter._load_payload("crouch_to_pick_bucket")
+    pelvis = list(payload["body_names"]).index("pelvis")
+    payload["body_rotations"][pelvis] = [1., 0., 0., 0.]
+    payload["object_quat_wxyz"] = _yaw_to_quat_wxyz(np.pi / 2)
+    calls = []
+    def load(name):
+        calls.append(name)
+        return payload
+    monkeypatch.setattr(retargeter, "_load_payload", load)
+    retargeter._select_keyframe_object("crouch_to_pick_bucket")
+    assert retargeter._source_alignment_axes() == ("-y", "z")
+    assert retargeter._source_alignment_axes() == ("-y", "z")
+    assert calls == ["crouch_to_pick_bucket"]
+    retargeter._select_keyframe_object("crouch_to_pick_box")
+    assert retargeter._source_alignment_axes() == ("y", "-z")
 
 
 def test_failure_diagnostics_identify_why_placement_is_repeated():
