@@ -8,6 +8,26 @@ from evaluation.evaluate_box_policies import perturbations
 import numpy as np
 
 
+@pytest.mark.parametrize("invalid_kind", ["missing", "duplicate_name"])
+def test_policy_cli_rejects_invalid_paths_before_creating_output(tmp_path, monkeypatch, invalid_kind):
+    from evaluation.evaluate_box_distances import main
+    first = tmp_path / "model.onnx"
+    paths = [first]
+    if invalid_kind == "duplicate_name":
+        first.touch()
+        second = tmp_path / "other" / first.name
+        second.parent.mkdir()
+        second.touch()
+        paths.append(second)
+    output = tmp_path / "results"
+    monkeypatch.setattr("sys.argv", ["evaluate_box_distances", "--output", str(output),
+                                    "--policies", *map(str, paths)])
+    with pytest.raises(SystemExit) as error:
+        main()
+    assert error.value.code == 2
+    assert not output.exists()
+
+
 @pytest.mark.parametrize("approach_ok", [False, True])
 @pytest.mark.parametrize("nominal_x", [-2., -.15, -1.95])
 def test_failed_approach_resets_but_successful_approach_continues(tmp_path, approach_ok, nominal_x):
@@ -50,6 +70,28 @@ def test_approach_range_preserves_noise_and_pairing():
         assert b["place_distance_m"] == round(.2*(i+1),1)
         for key in ("box_pos", "root_quat", "box_quat", "walking_noise_seed", "place_offset_xy_m"):
             assert a[key] == b[key]
+
+
+def test_repeated_sweep_has_100_unique_resets_and_ten_of_each_distance():
+    trials = sweep_initial_conditions([.5, 2.3], repetitions=10)
+    assert len(trials) == 100
+    assert trials[:10] == sweep_initial_conditions([.5, 2.3])
+    assert trials == sweep_initial_conditions([.5, 2.3], repetitions=10)
+    assert trials != sweep_initial_conditions([.5, 2.3], repetitions=10, seed=20260915)
+    assert [t["trial"] for t in trials] == list(range(1, 101))
+    assert len({tuple(t["box_pos"]) for t in trials}) == 100
+    assert len({t["walking_noise_seed"] for t in trials}) == 100
+    for case in range(10):
+        for trial in trials[case::10]:
+            np.testing.assert_allclose(trial["approach_distance_m"], .5 + .2 * case)
+            assert trial["place_distance_m"] == round(.2 * (case + 1), 1)
+            assert abs(trial["root_pos"][0] - trial["nominal_root_x_m"]) <= .02
+
+
+@pytest.mark.parametrize("repetitions", [0, -1, 1.5])
+def test_repeated_sweep_rejects_invalid_repetition_count(repetitions):
+    with pytest.raises(ValueError):
+        sweep_initial_conditions(repetitions=repetitions)
 
 
 def test_endpoint_errors_include_later_failed_trials():

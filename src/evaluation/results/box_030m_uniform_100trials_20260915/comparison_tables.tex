@@ -1,0 +1,64 @@
+% Requires \usepackage{booktabs,graphicx}
+% model_101000.onnx vs model_29000_uniform.onnx, 100 paired trials each.
+\begin{table}[t]
+\centering
+\caption{Success rates with a 0.30\,m box over 100 trials per
+policy. Pick/place permit recovery after failed approach;
+end-to-end excludes resets.}
+\label{tab:success_rates}
+\setlength{\tabcolsep}{3pt}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lcccc}
+\toprule
+Method & Approach & Pick & Place & End-to-end \\
+\midrule
+Uniform
+& $97\%$ & $63\%$ & $63\%$ & $44\%$ \\
+Saliency-based (ours)
+& $\mathbf{99\%}$ & $\mathbf{95\%}$
+& $\mathbf{93\%}$ & $\mathbf{92\%}$ \\
+\bottomrule
+\end{tabular}%
+}
+\vspace{-3pt}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{Goal-reaching errors (mean $\pm$ std) at passed
+keyframe endpoints, including later-failed trials.
+Approach/pick/place sample counts are 97/88/63 for Uniform
+and 99/100/93 for saliency-based sampling.}
+\label{tab:tracking_errors}
+\setlength{\tabcolsep}{3pt}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lccc}
+\toprule
+Method & Root (m) $\downarrow$ & Joint RMSE (rad) $\downarrow$
+       & Object (m) $\downarrow$ \\
+\midrule
+\multicolumn{4}{l}{\textbf{Approach}} \\
+Uniform
+& $\mathbf{0.100 \pm 0.050}$ & $0.099 \pm 0.007$ & -- \\
+Saliency-based (ours)
+& $0.113 \pm 0.047$ & $\mathbf{0.075 \pm 0.004}$ & -- \\
+\midrule
+\multicolumn{4}{l}{\textbf{Pick}} \\
+Uniform
+& $0.149 \pm 0.043$ & $0.150 \pm 0.020$ & $0.170 \pm 0.094$ \\
+Saliency-based (ours)
+& $\mathbf{0.119 \pm 0.034}$ & $\mathbf{0.116 \pm 0.007}$
+& $\mathbf{0.043 \pm 0.035}$ \\
+\midrule
+\multicolumn{4}{l}{\textbf{Place}} \\
+Uniform
+& $0.162 \pm 0.048$ & $0.139 \pm 0.009$
+& $\mathbf{0.082 \pm 0.026}$ \\
+Saliency-based (ours)
+& $\mathbf{0.067 \pm 0.018}$ & $\mathbf{0.121 \pm 0.004}$
+& $0.227 \pm 0.043$ \\
+\bottomrule
+\end{tabular}%
+}
+\vspace{-3pt}
+\end{table}

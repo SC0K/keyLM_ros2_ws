@@ -53,6 +53,12 @@ Fixed 1 m placement benchmark (the original three-policy comparison had no extra
 
 This runner also accepts `--policies <onnx-path> ...`, `--skip-approach`, `--initial-root-pos X Y Z` and `--place-noise-xy-m`. Its current placement-noise default is ±0.10 m per XY axis; specify zero to reproduce the original fixed-target benchmark. The distance-sweep runner uses no extra placement noise.
 
+The distance-sweep runner also accepts `--policies <onnx-path> ...` to compare other checkpoints on the same paired trials.
+
+Add `--repetitions 10` for 100 trials per policy: ten repetitions of each distance pair with independent reset perturbations. The default seed is 20260911 (`--seed` overrides it); the first ten samples remain identical to the original one-repetition sweep.
+
+Use `--physical-box-size 0.3 0.3 0.3` for a physical 0.30 m cube. This saves evaluation-only scene/robot XML snapshots in the result directory; live scenes, flat-hand geometry, mass/inertia, and retargeting dimensions are unchanged. Omit it to use the normal box scene.
+
 All output directories must be new; existing results are never overwritten.
 
 ## Replay

@@ -8,6 +8,32 @@ from crl_g1_goalcontroller_python.g1_keyframe_controller import root_com_linear_
 import mujoco
 
 
+def test_box_size_snapshot_preserves_physics_and_live_scene(tmp_path):
+    from evaluation.evaluate_box_policies import snapshot_box_scene, sha256
+    digest = sha256(SCENE)
+    scene = snapshot_box_scene(tmp_path, [.3, .3, .3])
+    original = mujoco.MjModel.from_xml_path(str(SCENE))
+    cube = mujoco.MjModel.from_xml_path(str(scene))
+    assert sha256(SCENE) == digest
+    assert (original.nq, original.nv, original.nu) == (cube.nq, cube.nv, cube.nu)
+    for name in ("box_geom", "target_object_geom"):
+        np.testing.assert_allclose(cube.geom(name).size, [.15, .15, .15])
+    # The resized target mocap marker has inferred mass but no dynamic DOFs.
+    dynamic = original.body_mocapid < 0
+    for attr in ("body_mass", "body_inertia"):
+        np.testing.assert_allclose(getattr(cube, attr)[dynamic], getattr(original, attr)[dynamic])
+    for attr in ("geom_friction", "geom_solref", "geom_solimp"):
+        np.testing.assert_allclose(getattr(cube, attr), getattr(original, attr))
+    assert cube.body("left_flat_hand").id > 0
+
+
+@pytest.mark.parametrize("size", [[0, .3, .3], [-.3, .3, .3], [.3, .3], [float("nan"), .3, .3]])
+def test_box_size_snapshot_rejects_invalid_dimensions(tmp_path, size):
+    from evaluation.evaluate_box_policies import snapshot_box_scene
+    with pytest.raises(ValueError):
+        snapshot_box_scene(tmp_path, size)
+
+
 def test_paired_perturbations_reproducible_bounded_and_keep_heights():
     trials = perturbations(10, 20260911)
     assert trials == perturbations(10, 20260911)

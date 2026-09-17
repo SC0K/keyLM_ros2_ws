@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 from types import SimpleNamespace
 import time
+import xml.etree.ElementTree as ET
 
 import mujoco
 import numpy as np
@@ -57,6 +58,32 @@ THRESHOLD_PARAMETERS = (
 
 def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def snapshot_box_scene(output, size_xyz):
+    """Copy the flat-hand scene with evaluation-only physical box dimensions.
+
+    Keep mass, inertia, contact settings and retargeting geometry unchanged.
+    Save the robot XML as well, resolving its mesh directory for later replay.
+    """
+    size = np.asarray(size_xyz, dtype=float)
+    if size.shape != (3,) or not np.all(np.isfinite(size)) or np.any(size <= 0):
+        raise ValueError("Physical box size must be three positive finite dimensions")
+    output = Path(output).resolve()
+    scene = ET.parse(SCENE)
+    include = scene.getroot().find("include")
+    robot_source = SCENE.parent / include.attrib["file"]
+    robot = ET.parse(robot_source)
+    compiler = robot.getroot().find("compiler")
+    compiler.set("meshdir", str((robot_source.parent / compiler.get("meshdir", ".")).resolve()))
+    robot_path = output / "robot_snapshot.xml"
+    robot.write(robot_path, encoding="unicode")
+    include.set("file", str(robot_path))
+    for name in ("box_geom", "target_object_geom"):
+        scene.getroot().find(f".//geom[@name='{name}']").set("size", " ".join(f"{v:.15g}" for v in size / 2))
+    scene_path = output / "scene_snapshot.xml"
+    scene.write(scene_path, encoding="unicode")
+    return scene_path
 
 
 def perturbations(trials, seed, initial_root_pos=(-2., 0., .8), place_noise_xy_m=0.):
@@ -127,7 +154,7 @@ def summarize(trials):
 class Evaluator:
     def __init__(self, config, policy, output, args):
         self.output, self.args = output, args
-        self.model = mujoco.MjModel.from_xml_path(str(SCENE))
+        self.model = mujoco.MjModel.from_xml_path(str(getattr(args, "scene", SCENE)))
         self.model.opt.timestep = .001667  # g1_simulator.yaml, ten physics steps per policy tick
         self.data = mujoco.MjData(self.model)
         self.joint_ids = np.array([self.model.joint(name).id for name in control.POLICY_JOINT_NAMES])
