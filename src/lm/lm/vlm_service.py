@@ -17,7 +17,7 @@ from pydantic import BaseModel, ValidationError
 
 from lm.keyframe_modes import MANIPULATION_KEYFRAMES, PLANNER_KEYFRAMES, keyframe_phase, keyframe_object_type
 from lm.vlm_connection import DEFAULT_MODEL, DEFAULT_OLLAMA_HOST
-from lm_interfaces.srv import VLMQuery
+from lm_interfaces.srv import RenderImage, VLMQuery
 
 try:
     import cv2
@@ -206,6 +206,7 @@ class VLMServiceNode(Node):
         self.declare_parameter("service_name", "/vlm/query")
         self.declare_parameter("image_topic", "/camera/image_raw")
         self.declare_parameter("request_image_topic", "/vlm/request_image")
+        self.declare_parameter("render_image_service", "")
         self.declare_parameter("image_wait_timeout_sec", 10.0)
         self.declare_parameter("ollama_host", DEFAULT_OLLAMA_HOST)
         self.declare_parameter("model_name", DEFAULT_MODEL)
@@ -227,6 +228,10 @@ class VLMServiceNode(Node):
         self._latest_image_sequence = 0
         self._image_condition = threading.Condition()
         self._callback_group = ReentrantCallbackGroup()
+        render_service = str(self.get_parameter("render_image_service").value).strip()
+        self._render_client = (self.create_client(RenderImage, render_service,
+                                                 callback_group=self._callback_group)
+                               if render_service else None)
         self._bridge = CvBridge() if CvBridge is not None else None
         self._cv_bridge_error_logged = False
 
@@ -276,6 +281,24 @@ class VLMServiceNode(Node):
     def _current_image_sequence(self) -> int:
         with self._image_condition:
             return self._latest_image_sequence
+
+    def _capture_request_image(self):
+        if self._render_client is None:
+            return self._copy_next_image_after(self._current_image_sequence(), self._image_wait_timeout_sec)
+        deadline = time.monotonic() + self._image_wait_timeout_sec
+        if not self._render_client.wait_for_service(timeout_sec=self._image_wait_timeout_sec):
+            raise RuntimeError("Simulation render service is unavailable")
+        future = self._render_client.call_async(RenderImage.Request())
+        completed = threading.Event()
+        future.add_done_callback(lambda _: completed.set())
+        if not completed.wait(max(0.0, deadline - time.monotonic())):
+            future.cancel()
+            raise RuntimeError("Timed out waiting for simulation request render")
+        result = future.result()
+        if not result.success:
+            raise RuntimeError(result.error_message)
+        msg = result.image
+        return self._bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8"), msg.header.stamp, msg.header.frame_id
 
     def _copy_next_image_after(self, image_sequence: int, timeout_sec: float):
         deadline = time.monotonic() + max(0.0, timeout_sec)
@@ -362,11 +385,12 @@ class VLMServiceNode(Node):
             response.error_message = "task_text cannot be empty"
             return response
 
-        request_start_image_sequence = self._current_image_sequence()
-        request_image_bgr, request_image_stamp, request_image_frame_id = self._copy_next_image_after(
-            request_start_image_sequence,
-            self._image_wait_timeout_sec,
-        )
+        try:
+            request_image_bgr, request_image_stamp, request_image_frame_id = self._capture_request_image()
+        except Exception as exc:
+            response.success = False
+            response.error_message = f"Could not capture request image: {exc}"
+            return response
         if request_image_stamp is None or request_image_bgr is None:
             response.success = False
             response.error_message = (

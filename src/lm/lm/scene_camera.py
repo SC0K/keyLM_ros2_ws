@@ -13,6 +13,7 @@ from geometry_msgs.msg import PoseArray, PoseStamped
 from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.node import Node
 from sensor_msgs.msg import Image
+from lm_interfaces.srv import RenderImage
 
 
 def _normalize_quat_wxyz(quat: np.ndarray) -> np.ndarray:
@@ -66,6 +67,8 @@ class SceneCameraNode(Node):
         self.declare_parameter("height", 480)
         self.declare_parameter("frame_id", "vlm_camera")
         self.declare_parameter("robot_xml", "")
+        self.declare_parameter("render_image_service", "")
+        self.declare_parameter("render_state_timeout_sec", 1.0)
         self.declare_parameter("monitor_topic", "/g1_sim/monitor")
         self.declare_parameter("object_pose_topic", "/actual_box_pose")
         self.declare_parameter("object_joint_name", "box_freejoint")
@@ -216,6 +219,7 @@ class SceneCameraNode(Node):
 
     def _init_mujoco_backend(self) -> None:
         self._lock = threading.Lock()
+        self._last_monitor_time = self._last_object_time = float("-inf")
         self._xml_path = self._resolve_robot_xml(str(self.get_parameter("robot_xml").value).strip())
         self._model = mujoco.MjModel.from_xml_path(str(self._xml_path))
         self._data = mujoco.MjData(self._model)
@@ -261,6 +265,9 @@ class SceneCameraNode(Node):
                 self._on_robot_goal, 10,
             )
         self._timer = self.create_timer(1.0 / self._rate_hz, self._publish_mujoco_image)
+        render_service = str(self.get_parameter("render_image_service").value).strip()
+        if render_service:
+            self._render_service = self.create_service(RenderImage, render_service, self._on_render_image)
         self.get_logger().info(
             f"Scene camera rendering {self._xml_path} to {self._topic} at {self._rate_hz:.2f} Hz"
         )
@@ -359,6 +366,7 @@ class SceneCameraNode(Node):
         with self._lock:
             self._data.qpos[0:3] = root_pos
             self._have_monitor = True
+            self._last_monitor_time = time.monotonic()
             self._data.qpos[3:7] = root_quat
             for name, pos in zip(msg.sensor.joint.name, msg.sensor.joint.position):
                 joint_id = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_JOINT, str(name))
@@ -378,26 +386,29 @@ class SceneCameraNode(Node):
                 self._data.qpos[adr : adr + 3] = pos
                 self._data.qpos[adr + 3 : adr + 7] = quat
                 self._have_object_pose = True
+                self._last_object_time = time.monotonic()
 
-    def _publish_mujoco_image(self) -> None:
-        if self._recording is not None and not (self._have_monitor and self._have_object_pose):
-            return
+    def _on_render_image(self, request, response):
+        now = time.monotonic()
+        timeout = float(self.get_parameter("render_state_timeout_sec").value)
+        if (not self._have_monitor or not self._have_object_pose
+                or now - min(self._last_monitor_time, self._last_object_time) > timeout):
+            response.success = False
+            response.error_message = "Cannot render request: robot/object state is missing or stale"
+            return response
         try:
-            with self._lock:
-                mujoco.mj_forward(self._model, self._data)
-                self._renderer.update_scene(self._data, camera=self._camera, scene_option=self._scene_option)
-                bgr = np.ascontiguousarray(self._renderer.render()[:, :, ::-1])
+            response.image = self._render_mujoco_image()
+            response.success = True
         except Exception as exc:
-            now = time.monotonic()
-            if now - self._last_render_error_log_time > 2.0:
-                self.get_logger().error(f"Scene camera render failed: {exc}")
-                self._last_render_error_log_time = now
-            return
+            response.success = False
+            response.error_message = f"Request render failed: {exc}"
+        return response
 
-        if self._recording is not None:
-            self._recording.write(bgr)
-        if not self._publish_images:
-            return
+    def _render_mujoco_image(self):
+        with self._lock:
+            mujoco.mj_forward(self._model, self._data)
+            self._renderer.update_scene(self._data, camera=self._camera, scene_option=self._scene_option)
+            bgr = np.ascontiguousarray(self._renderer.render()[:, :, ::-1])
         msg = Image()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = self._frame_id
@@ -407,6 +418,25 @@ class SceneCameraNode(Node):
         msg.is_bigendian = 0
         msg.step = self._width * 3
         msg.data = bgr.astype(np.uint8).tobytes()
+        return msg
+
+    def _publish_mujoco_image(self) -> None:
+        if self._recording is not None and not (self._have_monitor and self._have_object_pose):
+            return
+        try:
+            msg = self._render_mujoco_image()
+        except Exception as exc:
+            now = time.monotonic()
+            if now - self._last_render_error_log_time > 2.0:
+                self.get_logger().error(f"Scene camera render failed: {exc}")
+                self._last_render_error_log_time = now
+            return
+
+        if self._recording is not None:
+            bgr = np.frombuffer(msg.data, dtype=np.uint8).reshape(self._height, self._width, 3)
+            self._recording.write(bgr)
+        if not self._publish_images:
+            return
         self._pub.publish(msg)
         if not self._published_first_image:
             self._published_first_image = True
