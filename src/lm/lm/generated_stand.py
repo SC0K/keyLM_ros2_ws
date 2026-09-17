@@ -27,3 +27,26 @@ def generated_stand_joint_delta(lean_rad: float) -> np.ndarray:
     delta = np.zeros(len(POLICY_JOINT_NAMES), dtype=np.float32)
     delta[POLICY_JOINT_NAMES.index("waist_pitch_joint")] = lean_rad
     return delta
+
+
+def align_stand_to_current_feet(model, current_qpos, standing_qpos) -> np.ndarray:
+    """Translate a stand in XY to match the live ankle midpoint, using FK only.
+
+    Standing height, heading and all joint angles remain unchanged. This does
+    not pin each foot separately or compensate for different stance widths.
+    """
+    import mujoco
+
+    current = np.asarray(current_qpos, dtype=np.float64)
+    standing = np.asarray(standing_qpos, dtype=np.float64).copy()
+    if any(q.shape != (model.nq,) or not np.all(np.isfinite(q)) for q in (current, standing)):
+        raise ValueError("Foot anchoring requires finite full-model qpos vectors")
+    feet = [model.body(name).id for name in ("left_ankle_roll_link", "right_ankle_roll_link")]
+    data = mujoco.MjData(model)
+    data.qpos[:] = current
+    mujoco.mj_forward(model, data)
+    current_midpoint = data.xpos[feet, :2].mean(axis=0).copy()
+    data.qpos[:] = standing
+    mujoco.mj_forward(model, data)
+    standing[:2] += current_midpoint - data.xpos[feet, :2].mean(axis=0)
+    return standing

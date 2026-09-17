@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from io import BytesIO
 from pathlib import Path
 
@@ -11,6 +12,7 @@ import rclpy
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import PoseStamped
+from crl_humanoid_msgs.msg import Monitor
 from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.node import Node
 
@@ -36,7 +38,7 @@ from lm.keyframe_box_retarget import (
     matched_box_rotation,
     _yaw_from_matched_rotation,
 )
-from lm.generated_stand import POLICY_JOINT_NAMES, VLM_STANDING_LEAN_DEG, generated_stand_joint_delta
+from lm.generated_stand import POLICY_JOINT_NAMES, VLM_STANDING_LEAN_DEG, generated_stand_joint_delta, align_stand_to_current_feet
 from lm.keyframe_modes import MANIPULATION_KEYFRAMES, PLANNER_KEYFRAMES, source_keyframe_name, keyframe_phase, keyframe_object_type
 from std_srvs.srv import Trigger
 
@@ -229,6 +231,12 @@ class KeyframeRetargeterNode(Node):
 
         self.declare_parameter("retarget_keyframe_service", "/retargeter/generate_keyframe")
         self.declare_parameter("library_dir", "")
+        self.declare_parameter("monitor_topic", "/g1_sim/monitor")
+        self._standing_current_joints = None
+        self._standing_current_joints_time = None
+        self._standing_monitor_sub = self.create_subscription(
+            Monitor, str(self.get_parameter("monitor_topic").value), self._on_standing_monitor, 10
+        )
         self.declare_parameter("retarget_object_type", "box")
         self.declare_parameter("retarget_ik_enabled", False)
         self.declare_parameter("standing_config_file", "")
@@ -498,6 +506,22 @@ class KeyframeRetargeterNode(Node):
         response.message = "Object/task pose latches cleared; active robot goal unchanged"
         return response
 
+    def _on_standing_monitor(self, msg: Monitor) -> None:
+        """Cache measured joints in policy order for the final standing anchor."""
+        positions = np.asarray(msg.sensor.joint.position, dtype=np.float64)
+        names = list(msg.sensor.joint.name)
+        if names:
+            indices = {name: i for i, name in enumerate(names)}
+            if any(name not in indices or indices[name] >= positions.size for name in POLICY_JOINT_NAMES):
+                self._standing_current_joints = None
+                return
+            positions = positions[[indices[name] for name in POLICY_JOINT_NAMES]]
+        if positions.shape != (len(POLICY_JOINT_NAMES),) or not np.all(np.isfinite(positions)):
+            self._standing_current_joints = None
+            return
+        self._standing_current_joints = positions.copy()
+        self._standing_current_joints_time = time.monotonic()
+
     def _generate_stationary_stand(self, name: str, payload: dict[str, np.ndarray]) -> str:
         """Test-style default joints + lean, but retain this library frame's root Z."""
         bucket_pickup = self._retarget_object_type == "bucket" and name == "stand_before_pick"
@@ -518,11 +542,23 @@ class KeyframeRetargeterNode(Node):
         angles = self._standing_default_angles + self._standing_joint_delta
         for joint_name, value in zip(POLICY_JOINT_NAMES, angles):
             qpos[self._ik_model.joint(joint_name).qposadr[0]] = value
+        if name == "stand_after_place":
+            if (self._standing_current_joints is None or self._standing_current_joints_time is None
+                    or time.monotonic() - self._standing_current_joints_time > 2.0):
+                raise RuntimeError("Cannot anchor final stand to feet: waiting for fresh monitor joint positions")
+            current_qpos = self._ik_model.qpos0.copy()
+            current_qpos[:3] = self._target_root_center
+            current_qpos[3:7] = self._target_root_quat_wxyz
+            for joint_name, value in zip(POLICY_JOINT_NAMES, self._standing_current_joints):
+                current_qpos[self._ik_model.joint(joint_name).qposadr[0]] = value
+            qpos = align_stand_to_current_feet(self._ik_model, current_qpos, qpos)
         self._write_ik_result_to_payload(payload, qpos)  # FK only, no IK solve.
         center = (self._current_box_center if name == "stand_before_pick" else self._target_box_center).copy()
         quat = self._current_box_quat_wxyz if name == "stand_before_pick" else self._target_box_quat_wxyz
         center[2] = np.asarray(payload["object_position_xyz"]).reshape(-1, 3)[0, 2]
         self._write_policy_object_pose(payload, center, quat)
+        if name == "stand_after_place":
+            return "generated_stationary_stand_feet_midpoint"
         return "generated_stationary_stand_bucket_library_placement" if bucket_pickup else "generated_stationary_stand"
 
     def _retarget_planar(self, name: str, payload: dict[str, np.ndarray]) -> str:

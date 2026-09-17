@@ -263,6 +263,7 @@ def generate_launch_description() -> LaunchDescription:
                         "robot_xml": retargeter_robot_xml,
                         "retarget_object_type": LaunchConfiguration("retarget_object_type"),
                         "retarget_ik_enabled": ParameterValue(LaunchConfiguration("retarget_ik_enabled"), value_type=bool),
+                        "monitor_topic": monitor_topic,
                         "standing_config_file": ParameterValue(LaunchConfiguration("standing_config_file"), value_type=str),
                         "standing_waist_pitch_deg": ParameterValue(LaunchConfiguration("standing_waist_pitch_deg"), value_type=float),
                         "box_size_xyz": box_size_xyz,

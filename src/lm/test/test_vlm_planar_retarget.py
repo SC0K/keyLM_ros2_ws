@@ -2,6 +2,7 @@
 
 from io import BytesIO
 import json
+import time
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -179,6 +180,8 @@ def retargeter():
     with open(PYTHON_PACKAGE / "config/g1_keyframe_tracking_obj.yaml") as stream:
         config = yaml.safe_load(stream)
     node._standing_default_angles = np.asarray(config["default_angles"], dtype=np.float32)
+    node._standing_current_joints = node._standing_default_angles.copy()
+    node._standing_current_joints_time = time.monotonic()
     node._standing_joint_delta = generated_stand_joint_delta(np.deg2rad(VLM_STANDING_LEAN_DEG))
     node._retarget_ik_enabled = False
     node._retarget_object_type = "box"
@@ -197,6 +200,81 @@ def retargeter():
     node.get_logger = lambda: Mock()
     node._apply_box_ik = Mock(side_effect=AssertionError("IK must not run"))
     return node
+
+
+@pytest.mark.parametrize("kind", ["box", "bucket"])
+@pytest.mark.parametrize("yaw", [0., .7, -1.4])
+@pytest.mark.parametrize("roll", [0., .25])
+def test_final_stand_anchors_feet_without_joint_or_height_changes(retargeter, kind, yaw, roll):
+    from lm.keyframe_retargeter_node import _quat_wxyz_multiply
+    from crl_g1_goalcontroller_python.g1_keyframe_controller import (
+        G1KeyframeController, FEATURE_BODY_NAMES, MUJOCO_JOINT_NAMES, goal_state_from_payload,
+    )
+    retargeter._target_root_quat_wxyz = _quat_wxyz_multiply(
+        _yaw_to_quat_wxyz(yaw), np.array([np.cos(roll/2), np.sin(roll/2), 0., 0.])
+    )
+    for name, value in [("left_hip_pitch_joint", -1.1), ("right_hip_pitch_joint", -1.1),
+                        ("left_knee_joint", 1.7), ("right_knee_joint", 1.7)]:
+        retargeter._standing_current_joints[POLICY_JOINT_NAMES.index(name)] = value
+    current = retargeter._ik_model.qpos0.copy()
+    current[:3] = retargeter._target_root_center
+    current[3:7] = retargeter._target_root_quat_wxyz
+    for name, angle in zip(POLICY_JOINT_NAMES, retargeter._standing_current_joints):
+        current[retargeter._ik_model.joint(name).qposadr[0]] = angle
+    data = mujoco.MjData(retargeter._ik_model)
+    data.qpos[:] = current
+    mujoco.mj_forward(retargeter._ik_model, data)
+    feet = [retargeter._ik_model.body(n).id for n in ("left_ankle_roll_link", "right_ankle_roll_link")]
+    midpoint = data.xpos[feet, :2].mean(axis=0).copy()
+    blob, info = retargeter._process_keyframe(f"stand_after_place_{kind}", True)
+    with np.load(BytesIO(blob), allow_pickle=True) as payload:
+        names = list(payload["body_names"])
+        foot_rows = [names.index(n) for n in ("left_ankle_roll_link", "right_ankle_roll_link")]
+        np.testing.assert_allclose(payload["body_positions"][foot_rows, :2].mean(axis=0), midpoint, atol=1e-6)
+        actual = goal_state_from_payload(payload, retargeter._standing_default_angles).reshape(-1, 171)[0]
+    assert json.loads(info)["mode"] == "generated_stationary_stand_feet_midpoint"
+    assert np.linalg.norm(actual[:2] - current[:2]) > .01
+    # Test-sequence and VLM implementations give the same compact policy goal.
+    c = G1KeyframeController.__new__(G1KeyframeController)
+    c.model, c.data = retargeter._ik_model, mujoco.MjData(retargeter._ik_model)
+    c.default_angles = retargeter._standing_default_angles
+    c.num_actions = 29
+    c.feature_body_ids = [c.model.body(n).id for n in FEATURE_BODY_NAMES]
+    c.joint_qpos_adr = np.array([c.model.joint(n).qposadr[0] for n in MUJOCO_JOINT_NAMES])
+    c.policy_to_mujoco = np.array([POLICY_JOINT_NAMES.index(n) for n in MUJOCO_JOINT_NAMES])
+    c.root_pos, c.root_quat, c.joint_pos = current[:3], current[3:7], retargeter._standing_current_joints
+    c.default_goal_root_height_m = actual[2]
+    c.object_to_manipulate = c.have_object_pose = True
+    expected = c._default_goal_frame_at_current_feet(actual, retargeter._standing_joint_delta)
+    np.testing.assert_allclose(actual, expected, atol=2e-6)
+    retargeter._apply_box_ik.assert_not_called()
+
+
+@pytest.mark.parametrize("state", ["missing", "stale", "invalid"])
+def test_final_stand_rejects_unavailable_joint_state(retargeter, state):
+    from crl_humanoid_msgs.msg import Monitor
+    if state == "missing":
+        retargeter._standing_current_joints = None
+    elif state == "stale":
+        retargeter._standing_current_joints_time -= 3.
+    else:
+        msg = Monitor()
+        msg.sensor.joint.position = [float("nan")] * 29
+        retargeter._on_standing_monitor(msg)
+    with pytest.raises(RuntimeError, match="fresh monitor"):
+        retargeter._process_keyframe("stand_after_place_box", True)
+
+
+def test_standing_monitor_maps_joint_names(retargeter):
+    from crl_humanoid_msgs.msg import Monitor
+    msg = Monitor()
+    msg.sensor.joint.name = list(reversed(POLICY_JOINT_NAMES))
+    msg.sensor.joint.position = list(reversed(np.arange(29, dtype=float).tolist()))
+    retargeter._on_standing_monitor(msg)
+    np.testing.assert_array_equal(retargeter._standing_current_joints, np.arange(29))
+    msg.sensor.joint.name = ["wrong_joint"] * 29
+    retargeter._on_standing_monitor(msg)
+    assert retargeter._standing_current_joints is None
 
 
 @pytest.mark.parametrize("ik_enabled", [False, True])

@@ -1215,11 +1215,13 @@ class VLMClientNode(Node):
             target_root_center, target_root_quat = self._stand_before_pick_root_pose()
         elif phase == "stand_after_place":
             if self._has_robot_root_pose or self._has_monitor:
+                # Supply the live root as an FK input. The retargeter combines
+                # this pose with measured joints to anchor the stand to feet.
                 target_root_center = self._current_robot_center.copy()
                 target_root_quat = self._current_robot_quat_wxyz.copy()
             else:
-                self.get_logger().warn(
-                    "No current robot root pose available for stand_after_place; using default target root pose."
+                raise RuntimeError(
+                    "Cannot anchor stand_after_place to feet without a current robot root pose"
                 )
 
         target_root_pose_msg = self._pose_stamped_from(

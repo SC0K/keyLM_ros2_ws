@@ -21,6 +21,7 @@ import mujoco
 import numpy as np
 import rclpy
 from geometry_msgs.msg import PoseStamped
+from crl_humanoid_msgs.msg import Monitor
 from std_srvs.srv import Trigger
 import yaml
 
@@ -230,6 +231,10 @@ class Evaluator:
         c.current_object_pos_w[:] = d.qpos[self.box_adr:self.box_adr + 3]
         c.current_object_quat_w[:] = d.qpos[self.box_adr + 3:self.box_adr + 7]
         c.have_monitor = c.have_root_pose = c.have_object_pose = True
+        monitor = Monitor()
+        monitor.sensor.joint.name = list(control.POLICY_JOINT_NAMES)
+        monitor.sensor.joint.position = c.joint_pos.astype(float).tolist()
+        self.retargeter._on_standing_monitor(monitor)
         if self.planner is not None:
             p = self.planner
             p._current_robot_center = np.array(c.root_pos, dtype=np.float64)
