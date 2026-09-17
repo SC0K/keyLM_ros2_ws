@@ -74,6 +74,39 @@ def test_preview_does_not_change_policy_state_then_approves_exact_goal(controlle
     assert controller._pending_keyframe is None
 
 
+@pytest.mark.parametrize("other_state", [0, 1, 2])  # ESTOP, STAND, WALK
+def test_experiment_discards_keyframes_across_goal_transitions(controller, other_state):
+    controller.reset_keyframe_on_goal_transition = True
+    controller.have_goal = True
+    controller.goal_sequence[:] = 12.0
+    controller._pending_keyframe = {"id": "old-preview"}
+    controller.fixed_default_goal = np.ones(171)
+    controller._on_fsm_state(SimpleNamespace(cur_state=other_state))
+    assert not controller.have_goal
+    assert controller._pending_keyframe is None
+    assert controller.fixed_default_goal is None
+    assert controller.goal_step_counter == 0
+    # A target received while another controller owns the robot is also reset.
+    controller.have_goal = True
+    controller._on_fsm_state(SimpleNamespace(cur_state=control.GOAL_FSM_STATE))
+    assert not controller.have_goal
+    assert not controller.object_to_manipulate
+    assert controller.fixed_default_goal is None
+    assert controller.current_goal_index == 0
+    # Normal GOAL heartbeats must not clear a newly received VLM keyframe.
+    controller.have_goal = True
+    controller.goal_step_counter = 5
+    controller._on_fsm_state(SimpleNamespace(cur_state=control.GOAL_FSM_STATE))
+    assert controller.have_goal and controller.goal_step_counter == 5
+
+
+def test_non_experiment_keeps_loaded_sequence_on_goal_reentry(controller):
+    controller.have_goal = True
+    controller._on_fsm_state(SimpleNamespace(cur_state=2))
+    controller._on_fsm_state(SimpleNamespace(cur_state=control.GOAL_FSM_STATE))
+    assert controller.have_goal
+
+
 def test_locomotion_override_is_prepared_once_not_resampled_on_approval(controller):
     def walking(goals):
         goals = goals.copy()

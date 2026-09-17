@@ -163,6 +163,7 @@ def test_supervision_forwarded_to_robot_and_gui(launch_module, monkeypatch, mode
     forwarded = {name: perform_substitutions(context, normalize_to_list_of_substitutions(value))
                  for name, value in include.launch_arguments}
     assert forwarded["supervised_mode"] == "true"
+    assert forwarded["reset_keyframe_on_goal_transition"] == "true"
     from lm.vlm_planner_app import PLANNER_EXTRA_DEFAULTS
     assert "supervised_mode" in PLANNER_EXTRA_DEFAULTS
 
