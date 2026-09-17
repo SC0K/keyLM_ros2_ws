@@ -41,7 +41,7 @@ _AXIS_TO_LOCAL_VEC = {
 _GLOBAL_X_WORLD = np.array([1.0, 0.0, 0.0], dtype=np.float64)
 BUCKET_PLACE_OFFSET_WORLD_M = np.array([1.3, 1.3, 0.0], dtype=np.float64)
 BUCKET_PLACE_YAW_OFFSET_DEG = 90.0
-APPROACH_XY_OFFSET_M = 0.30
+APPROACH_XY_OFFSET_M = 0.35
 
 
 def published_goal_targets(data) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -183,7 +183,7 @@ class VLMClientNode(Node):
             list(REAL_TARGET_BOX_GEOMETRY.size_xyz),
             descriptor=ParameterDescriptor(dynamic_typing=True),
         )
-        self.declare_parameter("default_place_distance_m", 1.0)
+        self.declare_parameter("default_place_distance_m", 2.0)
         # XY root-to-box-center distance, not clearance from the box surface.
         self.declare_parameter("stand_before_pick_distance_m", 0.4)
         self.declare_parameter("pick_max_horizontal_distance_m", 0.45)
