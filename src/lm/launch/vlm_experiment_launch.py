@@ -50,6 +50,7 @@ def _robot_launch(context):
             "current_object_pose_topic": LaunchConfiguration("actual_box_pose_topic"),
             "retargeted_keyframe_topic": LaunchConfiguration("retargeted_keyframe_topic"),
             "supervised_mode": LaunchConfiguration("supervised_mode"),
+            "reset_keyframe_on_goal_transition": "true",
             "scene_object": LaunchConfiguration("scene_object"),
             "mocap_object_selection": LaunchConfiguration("mocap_object_selection"),
             "tracked_box_pose_topic": LaunchConfiguration("tracked_box_pose_topic"),
