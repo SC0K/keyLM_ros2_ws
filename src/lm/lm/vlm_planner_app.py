@@ -385,8 +385,8 @@ class VLMPlannerApp:
 
         center = ttk.Frame(self.root, padding=(0, 10, 0, 10))
         center.grid(row=0, column=1, sticky="nsew")
-        center.rowconfigure(0, weight=4)
-        center.rowconfigure(2, weight=1)
+        center.rowconfigure(0, weight=3)
+        center.rowconfigure(2, weight=2, minsize=360)
         center.columnconfigure(0, weight=1)
 
         right = ttk.Frame(self.root, padding=10)
@@ -438,7 +438,7 @@ class VLMPlannerApp:
             text="No VLM request image yet",
             anchor="center",
             compound="top",
-            height=10,
+            height=20,
         )
         self.request_image_label.grid(row=2, column=0, sticky="nsew")
 

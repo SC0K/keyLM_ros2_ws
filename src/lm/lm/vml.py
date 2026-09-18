@@ -183,7 +183,7 @@ class VLMClientNode(Node):
             list(REAL_TARGET_BOX_GEOMETRY.size_xyz),
             descriptor=ParameterDescriptor(dynamic_typing=True),
         )
-        self.declare_parameter("default_place_distance_m", 2.0)
+        self.declare_parameter("default_place_distance_m", 1.3)
         # XY root-to-box-center distance, not clearance from the box surface.
         self.declare_parameter("stand_before_pick_distance_m", 0.4)
         self.declare_parameter("pick_max_horizontal_distance_m", 0.45)

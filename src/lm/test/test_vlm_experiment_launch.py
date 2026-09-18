@@ -164,6 +164,7 @@ def test_supervision_forwarded_to_robot_and_gui(launch_module, monkeypatch, mode
                  for name, value in include.launch_arguments}
     assert forwarded["supervised_mode"] == "true"
     assert forwarded["reset_keyframe_on_goal_transition"] == "true"
+    assert forwarded["fix_default_goal_fallback"] == "true"
     from lm.vlm_planner_app import PLANNER_EXTRA_DEFAULTS
     assert "supervised_mode" in PLANNER_EXTRA_DEFAULTS
 
@@ -205,6 +206,7 @@ def test_real_launch_bridges_both_mocap_objects_and_has_one_selected_output(monk
     monkeypatch.setitem(module["generate_launch_description"].__globals__, "Node", capture)
     context = LaunchContext()
     context.launch_configurations["optitrack_bucket_pose_topic"] = "/custom/tracked_bucket"
+    context.launch_configurations["fix_default_goal_fallback"] = "true"
     for action in module["generate_launch_description"]().entities:
         if isinstance(action, DeclareLaunchArgument):
             action.execute(context)
@@ -220,4 +222,5 @@ def test_real_launch_bridges_both_mocap_objects_and_has_one_selected_output(monk
     controller = next(node for node in active if node["executable"] == "g1_keyframe_controller")
     config = evaluate_parameters(context, normalize_parameters(controller["parameters"]))[0]
     assert config["mocap_object_selection"] is True
+    assert config["fix_default_goal_fallback"] is True
     assert config["current_object_pose_topic"] not in (config["tracked_box_pose_topic"], config["tracked_bucket_pose_topic"])
